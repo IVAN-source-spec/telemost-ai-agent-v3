@@ -1,0 +1,30 @@
+from apps.api.schemas import CreateMeetingRequest, TaskResponse
+from core.orchestrator.contracts import SessionArtifactMetadata
+from core.orchestrator.sheaduler import schedule_session
+
+async def create_meeting_task(
+    request: CreateMeetingRequest,
+    selector,
+    queue_publisher,
+    metadata_store,
+) -> TaskResponse:
+    artifact_metadata = SessionArtifactMetadata(
+        session_id=request.session_id,
+        artifact_uri=request.artifact_uri or f"s3://telemost/{request.session_id}",
+        artifact_kind=request.artifact_kind or "audio",
+    )
+    result = await schedule_session(
+        session_id=request.session_id,
+        meeting_url=request.meeting_url,
+        queue_name="meetings",
+        selector=selector,
+        queue_publisher=queue_publisher,
+        metadata_store=metadata_store,
+        artifact_metadata=artifact_metadata,
+    )
+    return TaskResponse(
+        task_id=result.session_id,
+        status="queued",
+        bot_id=result.bot_id,
+        queue_message_id=result.queue_message_id,
+    )

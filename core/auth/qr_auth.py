@@ -1,0 +1,1 @@
+AUTH_QR_URL = "https://passport.yandex.ru/auth/magic?mode=qr"

@@ -1,0 +1,39 @@
+# Виртуальное окружение
+.venv/
+venv/
+env/
+ 
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+ 
+# Логи и записи
+logs/
+recordings/
+*.wav
+*.mp3
+*.webm
+ 
+# Конфигурации с секретами
+.env
+auth_state.json
+ 
+# Файлы IDE
+.vscode/
+.idea/
+ 
+# Файлы транскрипции (большие)
+*_pyannote_*.json
+*_voice_similarity_*.json
+*_stabilized_*.json
+*_post_pipeline.json
+ 
+# Файлы транскрипции
+*.txt
+ 
+test.py
+
+# Другое
+.DS_Store
+*.log
