@@ -1,5 +1,6 @@
 import datetime
 from typing import Dict, Optional
+from pathlib import Path
 
 _task_store: Dict[str, dict] = {}
 
@@ -21,3 +22,9 @@ def update_task_status(task_id: str, status: str, result: Optional[dict] = None)
 
 def get_task(task_id: str) -> Optional[dict]:
     return _task_store.get(task_id)
+
+def get_meeting_dir(session_id: str) -> Path:
+    recordings_dir = Path.cwd() / "recordings"
+    meeting_dir = recordings_dir / session_id
+    meeting_dir.mkdir(parents=True, exist_ok=True)
+    return meeting_dir

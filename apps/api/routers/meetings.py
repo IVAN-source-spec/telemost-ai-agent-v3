@@ -3,6 +3,7 @@ from ..schemas import CreateMeetingRequest, TaskResponse, TaskStatusResponse
 from ..services import create_meeting_task
 from ..dependencies import get_queue_publisher, get_bot_selector, get_metadata_store
 from ..task_store import create_task, get_task
+from ..session_utils import generate_session_id
 
 meetings_router = APIRouter(prefix="/api/v1/meetings", tags=["meetings"])
 
@@ -14,6 +15,9 @@ async def create_meeting(
         bot_selector=Depends(get_bot_selector),
         metadata_store=Depends(get_metadata_store),
 ):
+    if not req.session_id or req.session_id == "auto" or req.session_id == "string":
+        req.session_id = generate_session_id()
+        print(f"[API] Auto-generated session_id: {req.session_id}")
     try:
         response = await create_meeting_task(req, bot_selector, queue_publisher, metadata_store)
         create_task(response.task_id, status="queued")

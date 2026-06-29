@@ -7,13 +7,85 @@ from core.browser_bot.client import TelemostBot
  
 queue = queue_publisher_instance
  
+# async def process_task(task_data):
+#     session_id = task_data.session_id
+#     meeting_url = task_data.meeting_url
+#     print(f"[Worker] Processing task: {session_id} -> {meeting_url}")
+ 
+#     update_task_status(session_id, "running")
+#     try:
+#         bot = TelemostBot(headless=False)
+#         config = {
+#             "alone_leave_threshold": 20,  # 2 минуты
+#             "max_reconnect_attempts": 3,
+#             "reconnect_interval_sec": 10,
+#             "session_id": session_id,
+#         }
+#         await bot.run(meeting_url, config)
+ 
+#         # === ТРАНСКРИБАЦИЯ ===
+#         audio_file = Path.cwd() / "recordings" / session_id / f"recording_{session_id}.wav"
+ 
+#         if audio_file.exists():
+#             print(f"[Worker] Audio file found, starting transcription...")
+ 
+#             api_key = os.getenv("PYANNOTE_API_KEY")
+#             if not api_key:
+#                 print("[Worker] PYANNOTE_API_KEY not set, skipping transcription")
+#                 update_task_status(session_id, "completed", result={
+#                     "message": "Meeting finished, transcription skipped (no API key)"
+#                 })
+#             else:
+#                 try:
+#                     from core.transcription.adapter import TranscriptionAdapter
+#                     adapter = TranscriptionAdapter(
+#                         api_key=api_key,
+#                         similarity_mode=os.getenv("TRANSCRIPTION_SIMILARITY_MODE", "local")
+#                     )
+#                     result = adapter.transcribe(
+#                         audio_path=str(audio_file),
+#                         target_speakers=2,  # можно передавать из config
+#                     )
+ 
+#                     # Читаем стабилизированный транскрипт
+#                     transcript_path = result.get("stabilized_transcript_path")
+#                     if transcript_path:
+#                         with open(transcript_path, 'r', encoding='utf-8') as f:
+#                             transcript_text = f.read()
+#                     else:
+#                         transcript_text = "Transcription completed, but no text found"
+ 
+#                     update_task_status(session_id, "completed", result={
+#                         "message": "Meeting finished with transcription",
+#                         "transcription": transcript_text,
+#                         "pipeline_report": result,
+#                     })
+#                     print(f"[Worker] Transcription completed for {session_id}")
+ 
+#                 except Exception as e:
+#                     print(f"[Worker] Transcription failed: {e}")
+#                     update_task_status(session_id, "completed", result={
+#                         "message": "Meeting finished, transcription failed",
+#                         "error": str(e)
+#                     })
+#         else:
+#             update_task_status(session_id, "completed", result={"message": "Meeting finished successfully"})
+#             print(f"[Worker] Task {session_id} completed")
+ 
+#     except Exception as e:
+#         update_task_status(session_id, "failed", result={"error": str(e)})
+#         print(f"[Worker] Task {session_id} failed: {e}")
+
+
 async def process_task(task_data):
     session_id = task_data.session_id
     meeting_url = task_data.meeting_url
     print(f"[Worker] Processing task: {session_id} -> {meeting_url}")
- 
+
     update_task_status(session_id, "running")
+
     try:
+        # === ЗАПУСК БОТА ===
         bot = TelemostBot(headless=False)
         config = {
             "alone_leave_threshold": 20,  # 2 минуты
@@ -22,14 +94,20 @@ async def process_task(task_data):
             "session_id": session_id,
         }
         await bot.run(meeting_url, config)
- 
+
         # === ТРАНСКРИБАЦИЯ ===
-        recordings_dir = Path.cwd() / "recordings"
-        audio_file = recordings_dir / f"recording_{session_id}.wav"
- 
+        # Путь к аудиофайлу в папке встречи
+        audio_file = Path.cwd() / "recordings" / session_id / f"recording_{session_id}.wav"
+
         if audio_file.exists():
             print(f"[Worker] Audio file found, starting transcription...")
- 
+
+            # Получаем число участников из конфига (установлено ботом в методе run)
+            target_speakers = config.get("max_participants", 1)
+            if target_speakers == 0:
+                target_speakers = 1  # если никого не было, считаем монолог
+            print(f"[Worker] Target speakers for transcription: {target_speakers}")
+
             api_key = os.getenv("PYANNOTE_API_KEY")
             if not api_key:
                 print("[Worker] PYANNOTE_API_KEY not set, skipping transcription")
@@ -39,43 +117,75 @@ async def process_task(task_data):
             else:
                 try:
                     from core.transcription.adapter import TranscriptionAdapter
+
                     adapter = TranscriptionAdapter(
                         api_key=api_key,
                         similarity_mode=os.getenv("TRANSCRIPTION_SIMILARITY_MODE", "local")
                     )
+
                     result = adapter.transcribe(
                         audio_path=str(audio_file),
-                        target_speakers=2,  # можно передавать из config
+                        target_speakers=target_speakers,
                     )
- 
-                    # Читаем стабилизированный транскрипт
+
+                    # Читаем стабилизированный транскрипт (если есть)
                     transcript_path = result.get("stabilized_transcript_path")
                     if transcript_path:
                         with open(transcript_path, 'r', encoding='utf-8') as f:
                             transcript_text = f.read()
                     else:
-                        transcript_text = "Transcription completed, but no text found"
- 
+                        # Fallback: ищем любой .txt файл рядом с аудио
+                        txt_files = list(audio_file.parent.glob(f"{audio_file.stem}*.txt"))
+                        if txt_files:
+                            with open(txt_files[0], 'r', encoding='utf-8') as f:
+                                transcript_text = f.read()
+                        else:
+                            transcript_text = "Transcription completed, but no text found"
+
                     update_task_status(session_id, "completed", result={
                         "message": "Meeting finished with transcription",
                         "transcription": transcript_text,
                         "pipeline_report": result,
                     })
                     print(f"[Worker] Transcription completed for {session_id}")
- 
+
                 except Exception as e:
                     print(f"[Worker] Transcription failed: {e}")
-                    update_task_status(session_id, "completed", result={
-                        "message": "Meeting finished, transcription failed",
-                        "error": str(e)
-                    })
+
+                    # Fallback: если транскрипция упала, но есть .txt файл
+                    txt_files = list(audio_file.parent.glob(f"{audio_file.stem}*.txt"))
+                    if txt_files:
+                        try:
+                            with open(txt_files[0], 'r', encoding='utf-8') as f:
+                                transcript_text = f.read()
+                            update_task_status(session_id, "completed", result={
+                                "message": "Meeting finished with transcription (fallback)",
+                                "transcription": transcript_text
+                            })
+                            print(f"[Worker] Used fallback transcript file")
+                        except Exception as fallback_error:
+                            print(f"[Worker] Fallback also failed: {fallback_error}")
+                            update_task_status(session_id, "completed", result={
+                                "message": "Meeting finished, transcription failed",
+                                "error": str(e)
+                            })
+                    else:
+                        update_task_status(session_id, "completed", result={
+                            "message": "Meeting finished, transcription failed",
+                            "error": str(e)
+                        })
         else:
-            update_task_status(session_id, "completed", result={"message": "Meeting finished successfully"})
-            print(f"[Worker] Task {session_id} completed")
- 
+            update_task_status(session_id, "completed", result={
+                "message": "Meeting finished successfully (no audio file)"
+            })
+            print(f"[Worker] Task {session_id} completed (no audio)")
+
     except Exception as e:
+        # Любая ошибка на этапе выполнения бота
         update_task_status(session_id, "failed", result={"error": str(e)})
         print(f"[Worker] Task {session_id} failed: {e}")
+
+
  
 async def worker_loop():
     while True:

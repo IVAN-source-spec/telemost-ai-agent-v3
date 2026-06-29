@@ -135,23 +135,40 @@ class TelemostBot:
             self.recorder.start()
             print("[Bot] Audio recording started")
 
+    # def _stop_recording(self):
+    #     """Останавливает запись и сохраняет файл."""
+    #     if self.recorder is None:
+    #         return
+    #     self.recorder.stop()
+    #     if self.session_id:
+    #         filename = f"recording_{self.session_id}.wav"
+    #     else:
+    #         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    #         filename = f"recording_{timestamp}.wav"
+    #     recordings_dir = Path.cwd() / "recordings"
+    #     recordings_dir.mkdir(exist_ok=True)
+    #     filepath = recordings_dir / filename
+    #     self.recorder.save(str(filepath))
+    #     self.recorder.close()
+    #     self.recorder = None
+    #     print("[Bot] Audio recording saved")
+
     def _stop_recording(self):
-        """Останавливает запись и сохраняет файл."""
         if self.recorder is None:
             return
         self.recorder.stop()
         if self.session_id:
-            filename = f"recording_{self.session_id}.wav"
+            # Создаём папку для встречи
+            meeting_dir = Path.cwd() / "recordings" / self.session_id
+            meeting_dir.mkdir(parents=True, exist_ok=True)
+            filename = meeting_dir / f"recording_{self.session_id}.wav"
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"recording_{timestamp}.wav"
-        recordings_dir = Path.cwd() / "recordings"
-        recordings_dir.mkdir(exist_ok=True)
-        filepath = recordings_dir / filename
-        self.recorder.save(str(filepath))
+        self.recorder.save(str(filename))
         self.recorder.close()
         self.recorder = None
-        print("[Bot] Audio recording saved")
+        print(f"[Bot] Audio recording saved to {filename}")
 
 
 
@@ -206,24 +223,33 @@ class TelemostBot:
             await self._playwright.stop()
         print("[Bot] Left meeting")
 
+    
     async def run(self, meeting_url: str, config: dict):
         """Основной цикл работы бота: вход, мониторинг, выход."""
         session_id = config.get("session_id", None)
         await self.join(meeting_url, session_id)
-
+    
         alone_seconds = 0
         attempt = 0
+        max_participants = 0  # начинаем с 0, так как бот считает других участников
+    
         while True:
             participants = await self.get_participant_count()
             print(f"[Bot] Participants: {participants}")
-            if participants < 1:   #=
+    
+            # Сохраняем максимальное количество участников (исключая бота)
+            if participants > max_participants:
+                max_participants = participants
+                print(f"[Bot] Max participants detected: {max_participants}")
+    
+            if participants == 0:
                 alone_seconds += 5
-                if should_leave(alone_seconds, config.get("alone_leave_threshold", 20)): #120
+                if should_leave(alone_seconds, config.get("alone_leave_threshold", 20)):
                     print("[Bot] Leaving due to being alone too long")
                     break
             else:
                 alone_seconds = 0
-
+    
             if self.page.is_closed():
                 decision = plan_reconnect(
                     previous_participants=participants,
@@ -241,5 +267,46 @@ class TelemostBot:
                     print(f"[Bot] Giving up: {decision['reason']}")
                     break
             await asyncio.sleep(5)
-
+    
+        # Сохраняем максимальное количество участников в конфиг для транскрипции
+        config["max_participants"] = max_participants
         await self.leave()
+    
+    
+    # async def run(self, meeting_url: str, config: dict):
+    #     """Основной цикл работы бота: вход, мониторинг, выход."""
+    #     session_id = config.get("session_id", None)
+    #     await self.join(meeting_url, session_id)
+
+    #     alone_seconds = 0
+    #     attempt = 0
+    #     while True:
+    #         participants = await self.get_participant_count()
+    #         print(f"[Bot] Participants: {participants}")
+    #         if participants < 1:   #=
+    #             alone_seconds += 5
+    #             if should_leave(alone_seconds, config.get("alone_leave_threshold", 20)): #120
+    #                 print("[Bot] Leaving due to being alone too long")
+    #                 break
+    #         else:
+    #             alone_seconds = 0
+
+    #         if self.page.is_closed():
+    #             decision = plan_reconnect(
+    #                 previous_participants=participants,
+    #                 attempt=attempt,
+    #                 max_attempts=config.get("max_reconnect_attempts", 3),
+    #                 interval_sec=config.get("reconnect_interval_sec", 10),
+    #             )
+    #             if decision["action"] == "reconnect":
+    #                 print(f"[Bot] Reconnecting after {decision['delay_sec']}s")
+    #                 await asyncio.sleep(decision["delay_sec"])
+    #                 await self.join(meeting_url, session_id)
+    #                 attempt += 1
+    #                 continue
+    #             else:
+    #                 print(f"[Bot] Giving up: {decision['reason']}")
+    #                 break
+    #         await asyncio.sleep(5)
+
+    #     await self.leave()
