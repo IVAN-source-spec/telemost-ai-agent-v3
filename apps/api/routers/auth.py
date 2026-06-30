@@ -18,3 +18,8 @@ async def generate_qr():
     img.save(buffered, format="PNG")
     qr_base64 = base64.b64encode(buffered.getvalue()).decode()
     return QrResponse(url=AUTH_QR_URL, qr_code=qr_base64)
+
+
+@auth_router.post("/qr/start", response_model=QrResponse)
+async def start_qr_auth():
+    return await generate_qr()

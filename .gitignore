@@ -18,6 +18,7 @@ recordings/
 # Конфигурации с секретами
 .env
 auth_state.json
+auth_state.artifact.json
  
 # Файлы IDE
 .vscode/
