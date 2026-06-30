@@ -66,6 +66,7 @@ class TelemostBot:
             ]
         )
         self.context = await self.browser.new_context(
+            storage_state="auth_state.json",
             permissions=["camera", "microphone"],
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
@@ -74,43 +75,105 @@ class TelemostBot:
     
         await self.page.goto(meeting_url)
         print("[Bot] Navigated to meeting page")
-    
+
+
+
+                # === Обработка кнопки "Продолжить в браузере" ===
+
         try:
-            await self.page.evaluate('''() => {
-                const buttons = document.querySelectorAll('button');
-                for (let btn of buttons) {
-                    if (btn.innerText.includes('Продолжить в браузере')) {
-                        btn.click();
-                        return;
-                    }
-                }
-            }''')
-            print("[Bot] Clicked 'Продолжить в браузере' via JS")
+            # Способ 2: по точному тексту через XPath
+            await self.page.click('xpath=//button[contains(text(), "Продолжить в браузере")]')
+            print("[Bot] Clicked 'Продолжить в браузере' via XPath")
             await self.page.wait_for_selector('button:has-text("Подключиться")', timeout=10000)
-        except Exception as e:
-            print(f"[Bot] No 'Продолжить в браузере' button found, continuing: {e}")
-    
-        try:
-            result = await self.page.evaluate('''() => {
-                const buttons = document.querySelectorAll('button');
-                for (let btn of buttons) {
-                    const text = btn.innerText.trim();
-                    const aria = btn.getAttribute('aria-label') || '';
-                    if (text.includes('Подключиться') || aria.includes('Подключиться')) {
-                        btn.click();
-                        return 'clicked button with text: ' + text;
+        except Exception as e2:
+            print(f"[Bot] XPath method failed: {e2}")
+            try:
+                # Способ 3: JavaScript перебор кнопок
+                result = await self.page.evaluate('''() => {
+                    const buttons = document.querySelectorAll('button');
+                    for (let btn of buttons) {
+                        const text = btn.innerText.trim();
+                        const dataTestId = btn.getAttribute('data-testid') || '';
+                        if (text.includes('Продолжить') || dataTestId === 'orb-button') {
+                            btn.click();
+                            return 'clicked via JS: ' + (text || dataTestId);
+                        }
                     }
-                }
-                const testBtn = document.querySelector('[data-testid="join-button"]');
-                if (testBtn) {
-                    testBtn.click();
-                    return 'clicked via data-testid';
-                }
-                return 'not found';
+                    return 'not found';
+                }''')
+                print(f"[Bot] 'Продолжить в браузере' result: {result}")
+                await self.page.wait_for_selector('button:has-text("Подключиться")', timeout=10000)
+            except Exception as e3:
+                print(f"[Bot] All methods failed: {e3}")
+
+
+
+        # === НАЖИМАЕМ "ПОДКЛЮЧИТЬСЯ" (радикальное решение) ===
+        try:
+            # Ждём появления кнопки
+            await self.page.wait_for_selector('[data-testid="enter-conference-button"]', timeout=15000)
+            print("[Bot] Join button found")
+            
+            # Ждём, пока кнопка станет видимой и не заблокированной
+            await self.page.wait_for_selector('[data-testid="enter-conference-button"]:not([disabled]):visible', timeout=10000)
+            print("[Bot] Join button is visible and enabled")
+            
+            
+            # Принудительный клик через JavaScript
+            result = await self.page.evaluate('''() => {
+                const btn = document.querySelector('[data-testid="enter-conference-button"]');
+                if (!btn) return 'not found';
+                if (btn.disabled) return 'disabled';
+                
+                // Прокручиваем к кнопке
+                btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                
+                // Пытаемся кликнуть разными способами
+                btn.click();
+                btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                
+                // Также пробуем через событие pointer
+                btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+                btn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+                
+                return 'clicked';
             }''')
-            print(f"[Bot] 'Подключиться' result: {result}")
+            print(f"[Bot] JS click result: {result}")
+            
+            # Ждём изменения URL (признак входа)
+            try:
+                await self.page.wait_for_function(
+                    '''() => {
+                        const url = window.location.href;
+                        return url.includes('/j/') && url !== 'https://telemost.yandex.ru/j/37383287310143?from_passport=1';
+                    }''',
+                    timeout=15000
+                )
+                print("[Bot] URL changed, meeting joined!")
+            except:
+                print("[Bot] URL did not change, checking page content...")
+                
+                # Проверяем, не появилось ли окно выбора аккаунта
+                await self.page.screenshot(path="after_click_join.png")
+                print("[Bot] Screenshot saved as after_click_join.png")
+                
+                # Проверяем, не появилось ли что-то новое на странице
+                content = await self.page.evaluate('''() => {
+                    return {
+                        text: document.body.innerText,
+                        hasVideo: !!document.querySelector('video'),
+                        hasParticipants: !!document.querySelector('[data-testid="participant-item"]')
+                    };
+                }''')
+                print(f"[Bot] Page content: {content}")
+                
         except Exception as e:
             print(f"[Bot] Could not click 'Подключиться': {e}")
+            await self.page.screenshot(path="join_error.png")
+
+
     
         # Даём время на загрузку интерфейса встречи
         # await asyncio.sleep(3)
@@ -126,6 +189,15 @@ class TelemostBot:
         self._start_recording()
 
 
+        await asyncio.sleep(10)
+
+        #=====СКРИНШОТ=====
+        await self.page.screenshot(path="debug_screenshot_2.png")
+        title = await self.page.title()
+        print(f"[Bot] Page title: {title}")
+        html = await self.page.content()
+        print(f"[Bot] HTML length: {len(html)}")
+        #=====СКРИНШОТ=====
 
 
     def _start_recording(self):
@@ -134,24 +206,6 @@ class TelemostBot:
             self.recorder = AudioRecorder()
             self.recorder.start()
             print("[Bot] Audio recording started")
-
-    # def _stop_recording(self):
-    #     """Останавливает запись и сохраняет файл."""
-    #     if self.recorder is None:
-    #         return
-    #     self.recorder.stop()
-    #     if self.session_id:
-    #         filename = f"recording_{self.session_id}.wav"
-    #     else:
-    #         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    #         filename = f"recording_{timestamp}.wav"
-    #     recordings_dir = Path.cwd() / "recordings"
-    #     recordings_dir.mkdir(exist_ok=True)
-    #     filepath = recordings_dir / filename
-    #     self.recorder.save(str(filepath))
-    #     self.recorder.close()
-    #     self.recorder = None
-    #     print("[Bot] Audio recording saved")
 
     def _stop_recording(self):
         if self.recorder is None:
@@ -169,23 +223,6 @@ class TelemostBot:
         self.recorder.close()
         self.recorder = None
         print(f"[Bot] Audio recording saved to {filename}")
-
-
-
-
-    # async def get_participant_count(self) -> int:
-    #     """Возвращает количество участников на странице встречи."""
-    #     try:
-    #         count = await self.page.evaluate('''() => {
-    #             const items = document.querySelectorAll('[data-testid="participant-item"]');
-    #             return items.length;
-    #         }''')
-    #         return count
-    #     except Exception as e:
-    #         print(f"[Bot] Could not get participant count: {e}")
-    #         return 1
-
-
 
     async def get_participant_count(self) -> int:
         """Возвращает количество других участников на встрече (исключая бота)."""
@@ -271,42 +308,3 @@ class TelemostBot:
         # Сохраняем максимальное количество участников в конфиг для транскрипции
         config["max_participants"] = max_participants
         await self.leave()
-    
-    
-    # async def run(self, meeting_url: str, config: dict):
-    #     """Основной цикл работы бота: вход, мониторинг, выход."""
-    #     session_id = config.get("session_id", None)
-    #     await self.join(meeting_url, session_id)
-
-    #     alone_seconds = 0
-    #     attempt = 0
-    #     while True:
-    #         participants = await self.get_participant_count()
-    #         print(f"[Bot] Participants: {participants}")
-    #         if participants < 1:   #=
-    #             alone_seconds += 5
-    #             if should_leave(alone_seconds, config.get("alone_leave_threshold", 20)): #120
-    #                 print("[Bot] Leaving due to being alone too long")
-    #                 break
-    #         else:
-    #             alone_seconds = 0
-
-    #         if self.page.is_closed():
-    #             decision = plan_reconnect(
-    #                 previous_participants=participants,
-    #                 attempt=attempt,
-    #                 max_attempts=config.get("max_reconnect_attempts", 3),
-    #                 interval_sec=config.get("reconnect_interval_sec", 10),
-    #             )
-    #             if decision["action"] == "reconnect":
-    #                 print(f"[Bot] Reconnecting after {decision['delay_sec']}s")
-    #                 await asyncio.sleep(decision["delay_sec"])
-    #                 await self.join(meeting_url, session_id)
-    #                 attempt += 1
-    #                 continue
-    #             else:
-    #                 print(f"[Bot] Giving up: {decision['reason']}")
-    #                 break
-    #         await asyncio.sleep(5)
-
-    #     await self.leave()
