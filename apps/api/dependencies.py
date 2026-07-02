@@ -17,3 +17,4 @@ def get_metadata_store():
     return _metadata_store
 
 queue_publisher_instance = _queue_publisher
+bot_selector_instance = _bot_selector

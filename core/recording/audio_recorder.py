@@ -5,10 +5,11 @@ import time
 from pathlib import Path
  
 class AudioRecorder:
-    def __init__(self, sample_rate=44100, channels=2, chunk=1024):
+    def __init__(self, sample_rate=44100, channels=2, chunk=1024, log_prefix="[AudioRecorder]"):
         self.sample_rate = sample_rate
         self.channels = channels
         self.chunk = chunk
+        self.log_prefix = log_prefix
         self.format = pyaudio.paInt16
         self.audio = pyaudio.PyAudio()
         self.stream = None
@@ -16,6 +17,9 @@ class AudioRecorder:
         self._is_recording = False
         self._thread = None
         self._device_index = self._find_virtual_device()
+
+    def _log(self, message: str) -> None:
+        print(f"{self.log_prefix} {message}")
  
     def _find_virtual_device(self):
         """Ищет устройство virtual_sink.monitor для записи системного звука."""
@@ -23,13 +27,13 @@ class AudioRecorder:
         for i in range(self.audio.get_device_count()):
             info = self.audio.get_device_info_by_index(i)
             if info['maxInputChannels'] > 0 and target in info['name']:
-                print(f"[AudioRecorder] Found {target} at index {i}")
+                self._log(f"Found {target} at index {i}")
                 return i
         # Если не найдено, используем pulse (микрофон) как fallback
         for i in range(self.audio.get_device_count()):
             info = self.audio.get_device_info_by_index(i)
             if info['maxInputChannels'] > 0 and 'pulse' in info['name']:
-                print(f"[AudioRecorder] Using pulse as fallback at index {i}")
+                self._log(f"Using pulse as fallback at index {i}")
                 return i
         return None
  
@@ -40,7 +44,7 @@ class AudioRecorder:
         self._is_recording = True
  
         if self._device_index is None:
-            print("[AudioRecorder] No input device found")
+            self._log("No input device found")
             self._is_recording = False
             return
  
@@ -54,13 +58,13 @@ class AudioRecorder:
                 frames_per_buffer=self.chunk,
             )
         except Exception as e:
-            print(f"[AudioRecorder] Failed to open stream: {e}")
+            self._log(f"Failed to open stream: {e}")
             self._is_recording = False
             return
  
         self._thread = threading.Thread(target=self._record, daemon=True)
         self._thread.start()
-        print(f"[AudioRecorder] Recording started from device {self._device_index}")
+        self._log(f"Recording started from device {self._device_index}")
  
     def _record(self):
         while self._is_recording:
@@ -68,7 +72,7 @@ class AudioRecorder:
                 data = self.stream.read(self.chunk, exception_on_overflow=False)
                 self.frames.append(data)
             except Exception as e:
-                print(f"[AudioRecorder] Recording error: {e}")
+                self._log(f"Recording error: {e}")
                 break
  
     def stop(self):
@@ -81,11 +85,11 @@ class AudioRecorder:
             self.stream.stop_stream()
             self.stream.close()
             self.stream = None
-        print(f"[AudioRecorder] Recording stopped, captured {len(self.frames)} chunks")
+        self._log(f"Recording stopped, captured {len(self.frames)} chunks")
  
     def save(self, filepath: str):
         if not self.frames:
-            print("[AudioRecorder] No audio data to save")
+            self._log("No audio data to save")
             return
         Path(filepath).parent.mkdir(parents=True, exist_ok=True)
         with wave.open(filepath, 'wb') as wf:
@@ -93,7 +97,7 @@ class AudioRecorder:
             wf.setsampwidth(self.audio.get_sample_size(self.format))
             wf.setframerate(self.sample_rate)
             wf.writeframes(b''.join(self.frames))
-        print(f"[AudioRecorder] Saved audio to {filepath}")
+        self._log(f"Saved audio to {filepath}")
  
     def close(self):
         self.stop()

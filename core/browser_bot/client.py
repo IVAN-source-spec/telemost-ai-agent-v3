@@ -1,4 +1,5 @@
-import asyncio
+﻿import asyncio
+import builtins
 import json
 import os
 from urllib.parse import urlparse
@@ -25,8 +26,10 @@ class TelemostBot:
             auth_state_path: str | Path | None = None,
             auth_artifact_path: str | Path | None = None,
             profile_dir: str | Path | None = None,
+            bot_id: str | None = None,
     ):
         self.headless = headless
+        self.bot_id = bot_id or "unknown"
         self.page = None
         self.browser = None
         self.context = None
@@ -61,6 +64,11 @@ class TelemostBot:
         )
         self.display_name = os.getenv("TELEMOST_DISPLAY_NAME", "Recording Bot")
 
+    def _print(self, *args, **kwargs) -> None:
+        if args and isinstance(args[0], str):
+            args = (args[0].replace("[Bot]", f"[Bot:{self.bot_id}]", 1), *args[1:])
+        builtins.print(*args, **kwargs)
+
     def _resolve_storage_state_path(self) -> Path | None:
         if self.auth_state_path.exists():
             return self.auth_state_path
@@ -78,10 +86,10 @@ class TelemostBot:
             if not cookies:
                 return False
             await self.context.add_cookies(cookies)
-            print(f"[Bot] Loaded Yandex cookies fallback: {self.auth_cookies_path} ({len(cookies)} cookies)")
+            self._print(f"[Bot] Loaded Yandex cookies fallback: {self.auth_cookies_path} ({len(cookies)} cookies)")
             return True
         except Exception as error:
-            print(f"[Bot] Failed to load Yandex cookies fallback: {error}")
+            self._print(f"[Bot] Failed to load Yandex cookies fallback: {error}")
             return False
 
     async def _enter_guest_name(self) -> None:
@@ -98,21 +106,21 @@ class TelemostBot:
                 field = await self.page.wait_for_selector(selector, timeout=5000)
                 if field and await field.is_visible():
                     await field.fill(self.display_name)
-                    print(f"[Bot] Entered guest name: {self.display_name}")
+                    self._print(f"[Bot] Entered guest name: {self.display_name}")
                     await self.page.wait_for_timeout(1000)
                     return
             except Exception:
                 continue
-        print("[Bot] Guest name input not found or not needed")
+        self._print("[Bot] Guest name input not found or not needed")
 
     async def _click_continue_button_legacy(self, meeting_url: str) -> None:
         try:
             # Способ 2: по точному тексту через XPath
             await self.page.click('xpath=//button[contains(text(), "Продолжить в браузере")]', timeout=30000)
-            print("[Bot] Clicked 'Продолжить в браузере' via XPath")
+            self._print("[Bot] Clicked 'Продолжить в браузере' via XPath")
             await self.page.wait_for_selector('button:has-text("Подключиться")', timeout=10000)
         except Exception as e2:
-            print(f"[Bot] XPath method failed: {e2}")
+            self._print(f"[Bot] XPath method failed: {e2}")
             try:
                 # Способ 3: JavaScript перебор кнопок
                 result = await self.page.evaluate('''() => {
@@ -127,10 +135,10 @@ class TelemostBot:
                     }
                     return 'not found';
                 }''')
-                print(f"[Bot] 'Продолжить в браузере' result: {result}")
+                self._print(f"[Bot] 'Продолжить в браузере' result: {result}")
                 await self.page.wait_for_selector('button:has-text("Подключиться")', timeout=10000)
             except Exception as e3:
-                print(f"[Bot] All methods failed: {e3}")
+                self._print(f"[Bot] All methods failed: {e3}")
 
     async def _click_continue_button(self, meeting_url: str) -> None:
         try:
@@ -146,23 +154,23 @@ class TelemostBot:
                 }
                 return 'not found';
             }''')
-            print(f"[Bot] 'Продолжить в браузере' result: {result}")
+            self._print(f"[Bot] 'Продолжить в браузере' result: {result}")
             if result == "not found":
                 raise RuntimeError("Continue button not found via JS")
             await self.page.wait_for_selector('button:has-text("Подключиться")', timeout=10000)
             return
         except Exception as e1:
-            print(f"[Bot] JS method failed: {e1}")
+            self._print(f"[Bot] JS method failed: {e1}")
 
         try:
             await self.page.click(
                 'xpath=//button[contains(text(), "Продолжить в браузере")]',
                 timeout=5000,
             )
-            print("[Bot] Clicked 'Продолжить в браузере' via XPath")
+            self._print("[Bot] Clicked 'Продолжить в браузере' via XPath")
             await self.page.wait_for_selector('button:has-text("Подключиться")', timeout=10000)
         except Exception as e2:
-            print(f"[Bot] All methods failed: {e2}")
+            self._print(f"[Bot] All methods failed: {e2}")
 
     async def _click_ai_projects_join_button(self) -> str:
         for _ in range(60):
@@ -233,9 +241,9 @@ class TelemostBot:
                 }
                 return 'not found';
             }''')
-            print(f"[Bot] Microphone toggle result: {result}")
+            self._print(f"[Bot] Microphone toggle result: {result}")
         except Exception as e:
-            print(f"[Bot] Mute error: {e}")
+            self._print(f"[Bot] Mute error: {e}")
 
     async def join(self, meeting_url: str, session_id: str = None):
         self.session_id = session_id
@@ -248,7 +256,7 @@ class TelemostBot:
         }
 
         if self.profile_dir is not None:
-            print(
+            self._print(
                 "[Bot] TELEMOST_BROWSER_PROFILE_DIR is ignored: "
                 "AIProjects-style auth uses storage_state, not a persistent profile"
             )
@@ -261,14 +269,14 @@ class TelemostBot:
         storage_state_path = None if self.join_as_guest else self._resolve_storage_state_path()
         if self.join_as_guest:
             self.auth_ok = False
-            print("[Bot] AIProjects guest mode enabled: Yandex storage_state is not loaded for meeting join")
+            self._print("[Bot] AIProjects guest mode enabled: Yandex storage_state is not loaded for meeting join")
         elif storage_state_path is not None:
             context_options["storage_state"] = str(storage_state_path)
             self.auth_ok = True
-            print(f"[Bot] Loaded AIProjects-style storage_state: {storage_state_path}")
+            self._print(f"[Bot] Loaded AIProjects-style storage_state: {storage_state_path}")
         else:
             self.auth_ok = False
-            print(f"[Bot] Storage state not found: {self.auth_state_path}")
+            self._print(f"[Bot] Storage state not found: {self.auth_state_path}")
 
         self.context = await self.browser.new_context(**context_options)
 
@@ -279,7 +287,7 @@ class TelemostBot:
             message = "Authorized Yandex session unavailable"
             if self.require_auth:
                 raise RuntimeError(message)
-            print(f"[Bot] {message}; using guest mode")
+            self._print(f"[Bot] {message}; using guest mode")
         await self._install_timer_camera()
         self.page = await self.context.new_page()
         parsed_meeting_url = urlparse(meeting_url)
@@ -287,7 +295,7 @@ class TelemostBot:
         await self.context.grant_permissions(["camera", "microphone"], origin=meeting_origin)
 
         await self.page.goto(meeting_url, wait_until="domcontentloaded", timeout=60000)
-        print("[Bot] Navigated to meeting page")
+        self._print("[Bot] Navigated to meeting page")
         try:
             await self.page.wait_for_selector(
                 '.spinnerContainer_dP9Pg, [data-testid="orb-spinner"]',
@@ -301,14 +309,14 @@ class TelemostBot:
         await self._click_continue_button(meeting_url)
 
         if not self.join_as_guest:
-            print("[Bot] Joining as authenticated user")
+            self._print("[Bot] Joining as authenticated user")
         else:
             await self._enter_guest_name()
 
         # === НАЖИМАЕМ "ПОДКЛЮЧИТЬСЯ" (радикальное решение) ===
         try:
             result = await self._click_ai_projects_join_button()
-            print(f"[Bot] JS click result: {result}")
+            self._print(f"[Bot] JS click result: {result}")
             await self.page.wait_for_timeout(5000)
 
             # Ждём изменения URL (признак входа)
@@ -327,9 +335,9 @@ class TelemostBot:
                     }''',
                     timeout=15000
                 )
-                print("[Bot] URL changed, meeting joined!")
+                self._print("[Bot] URL changed, meeting joined!")
             except:
-                print("[Bot] URL did not change, checking page content...")
+                self._print("[Bot] URL did not change, checking page content...")
 
                 # Проверяем, не появилось ли что-то новое на странице
                 content = await self.page.evaluate('''() => {
@@ -339,10 +347,10 @@ class TelemostBot:
                         hasParticipants: !!document.querySelector('[data-testid="participant-item"]')
                     };
                 }''')
-                print(f"[Bot] Page content: {content}")
+                self._print(f"[Bot] Page content: {content}")
 
         except Exception as e:
-            print(f"[Bot] Could not click 'Подключиться': {e}")
+            self._print(f"[Bot] Could not click 'Подключиться': {e}")
 
         # Даём время на загрузку интерфейса встречи
         # await asyncio.sleep(3)
@@ -350,9 +358,9 @@ class TelemostBot:
         try:
             await self.page.wait_for_selector('[data-testid="participant-item"], video, [class*="participant"]',
                                               timeout=5000)
-            print("[Bot] Meeting page detected")
+            self._print("[Bot] Meeting page detected")
         except:
-            print("[Bot] Meeting page not detected, but continuing")
+            self._print("[Bot] Meeting page not detected, but continuing")
 
         self._start_meeting_timer()
         await self._push_timer_camera_state()
@@ -374,7 +382,7 @@ class TelemostBot:
             raise FileNotFoundError(f"Compositor script not found: {COMPOSITOR_SCRIPT_PATH}")
         script = COMPOSITOR_SCRIPT_PATH.read_text(encoding="utf-8")
         await self.context.add_init_script(script)
-        print("[Bot] Timer camera compositor installed")
+        self._print("[Bot] Timer camera compositor installed")
 
     async def _push_timer_camera_state(self) -> None:
         if not self.page or not self.meeting_started_at:
@@ -392,14 +400,14 @@ class TelemostBot:
             if not has_compositor:
                 script = COMPOSITOR_SCRIPT_PATH.read_text(encoding="utf-8")
                 await self.page.evaluate(script)
-                print("[Bot] Timer camera compositor reinjected")
+                self._print("[Bot] Timer camera compositor reinjected")
             await self.page.evaluate(
                 "(data) => window.__COMPOSITOR__ && window.__COMPOSITOR__.updateScene(data)",
                 payload,
             )
-            print("[Bot] Timer camera state updated")
+            self._print("[Bot] Timer camera state updated")
         except Exception as e:
-            print(f"[Bot] Timer camera update failed: {e}")
+            self._print(f"[Bot] Timer camera update failed: {e}")
 
     @staticmethod
     def _format_duration(total_seconds: int) -> str:
@@ -416,7 +424,7 @@ class TelemostBot:
         self.meeting_ended_at = None
         self.meeting_duration_seconds = 0
         self._write_meeting_time()
-        print(f"[Bot] Meeting timer started at {self.meeting_started_at.isoformat()}")
+        self._print(f"[Bot] Meeting timer started at {self.meeting_started_at.isoformat()}")
 
     def _finish_meeting_timer(self) -> None:
         if self.meeting_started_at is None:
@@ -426,7 +434,7 @@ class TelemostBot:
             (self.meeting_ended_at - self.meeting_started_at).total_seconds()
         )
         self._write_meeting_time()
-        print(
+        self._print(
             "[Bot] Meeting duration: "
             f"{self._format_duration(self.meeting_duration_seconds)}"
         )
@@ -450,9 +458,9 @@ class TelemostBot:
     def _start_recording(self):
         """Запускает запись аудио в фоновом потоке."""
         if self.recorder is None:
-            self.recorder = AudioRecorder()
+            self.recorder = AudioRecorder(log_prefix=f"[AudioRecorder:{self.bot_id}]")
             self.recorder.start()
-            print("[Bot] Audio recording started")
+            self._print("[Bot] Audio recording started")
 
     def _stop_recording(self):
         if self.recorder is None:
@@ -469,7 +477,7 @@ class TelemostBot:
         self.recorder.save(str(filename))
         self.recorder.close()
         self.recorder = None
-        print(f"[Bot] Audio recording saved to {filename}")
+        self._print(f"[Bot] Audio recording saved to {filename}")
 
     async def get_participant_count(self) -> int:
         """Возвращает количество других участников на встрече (исключая бота)."""
@@ -487,10 +495,10 @@ class TelemostBot:
                 }
                 return count;
             }''')
-            print(f"[Bot] Other participants count: {count}")
+            self._print(f"[Bot] Other participants count: {count}")
             return count
         except Exception as e:
-            print(f"[Bot] Could not get participant count: {e}")
+            self._print(f"[Bot] Could not get participant count: {e}")
             return 0  # Возвращаем 0, чтобы бот начал отсчёт одиночества
 
     async def leave(self):
@@ -506,7 +514,7 @@ class TelemostBot:
             await self.browser.close()
         if self._playwright:
             await self._playwright.stop()
-        print("[Bot] Left meeting")
+        self._print("[Bot] Left meeting")
 
     async def run(self, meeting_url: str, config: dict):
         """Основной цикл работы бота: вход, мониторинг, выход."""
@@ -519,17 +527,17 @@ class TelemostBot:
 
         while True:
             participants = await self.get_participant_count()
-            print(f"[Bot] Participants: {participants}")
+            self._print(f"[Bot] Participants: {participants}")
 
             # Сохраняем максимальное количество участников (исключая бота)
             if participants > max_participants:
                 max_participants = participants
-                print(f"[Bot] Max participants detected: {max_participants}")
+                self._print(f"[Bot] Max participants detected: {max_participants}")
 
             if participants == 0:
                 alone_seconds += 5
                 if should_leave(alone_seconds, config.get("alone_leave_threshold", 20)):
-                    print("[Bot] Leaving due to being alone too long")
+                    self._print("[Bot] Leaving due to being alone too long")
                     break
             else:
                 alone_seconds = 0
@@ -542,13 +550,13 @@ class TelemostBot:
                     interval_sec=config.get("reconnect_interval_sec", 10),
                 )
                 if decision["action"] == "reconnect":
-                    print(f"[Bot] Reconnecting after {decision['delay_sec']}s")
+                    self._print(f"[Bot] Reconnecting after {decision['delay_sec']}s")
                     await asyncio.sleep(decision["delay_sec"])
                     await self.join(meeting_url, session_id)
                     attempt += 1
                     continue
                 else:
-                    print(f"[Bot] Giving up: {decision['reason']}")
+                    self._print(f"[Bot] Giving up: {decision['reason']}")
                     break
             await asyncio.sleep(5)
 
@@ -565,3 +573,5 @@ class TelemostBot:
         config["meeting_duration_formatted"] = self._format_duration(
             self.meeting_duration_seconds
         )
+
+

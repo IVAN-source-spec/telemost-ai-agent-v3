@@ -8,19 +8,25 @@ class TranscriptionStatusManager:
         self.meeting_dir = meeting_dir
         self.status_file = meeting_dir / "transcription_status.json"
  
-    def create_status(self, audio_path: str, job_id: str, target_speakers: int = 1) -> dict:
-        status = {
+    def create_status(
+        self,
+        audio_path: str,
+        job_id: str | None,
+        target_speakers: int = 1,
+        status: str = "pending",
+    ) -> dict:
+        payload = {
             "audio_path": audio_path,
             "job_id": job_id,
             "target_speakers": target_speakers,
-            "status": "pending",
+            "status": status,
             "sent_at": datetime.now(timezone.utc).isoformat(),
             "completed_at": None,
             "transcript_path": None,
             "error": None
         }
-        self.status_file.write_text(json.dumps(status, ensure_ascii=True, indent=2), encoding='utf-8')
-        return status
+        self.status_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding='utf-8')
+        return payload
  
     def update_status(self, job_id: str, status: str, transcript_path: Optional[str] = None, error: Optional[str] = None) -> dict | None:
         if not self.status_file.exists():
