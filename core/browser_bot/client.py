@@ -8,13 +8,14 @@ from core.meeting_runtime.participant_policy import should_leave
 from core.browser_bot.connection_monitor import plan_reconnect
 from core.recording.audio_recorder import AudioRecorder
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from core.constants import USER_AGENT, VIEWPORT, CHROMIUM_ARGS
 
 DEFAULT_STORAGE_STATE_PATH = "data/auth/yandex-session.json"
 DEFAULT_COOKIES_PATH = "data/auth/cookies.json"
 DEFAULT_ARTIFACT_PATH = "auth_state.artifact.json"
 DEFAULT_PROFILE_DIR = ".telemost-browser-profile"
+COMPOSITOR_SCRIPT_PATH = Path(__file__).resolve().parent / "assets" / "compositor.js"
 
 
 class TelemostBot:
@@ -32,6 +33,9 @@ class TelemostBot:
         self._playwright = None
         self.recorder = None
         self.session_id = None
+        self.meeting_started_at = None
+        self.meeting_ended_at = None
+        self.meeting_duration_seconds = 0
         self.auth_ok = False
         self.auth_state_path = Path(
             auth_state_path
@@ -101,7 +105,7 @@ class TelemostBot:
                 continue
         print("[Bot] Guest name input not found or not needed")
 
-    async def _click_continue_button(self, meeting_url: str) -> None:
+    async def _click_continue_button_legacy(self, meeting_url: str) -> None:
         try:
             # Способ 2: по точному тексту через XPath
             await self.page.click('xpath=//button[contains(text(), "Продолжить в браузере")]', timeout=30000)
@@ -127,6 +131,38 @@ class TelemostBot:
                 await self.page.wait_for_selector('button:has-text("Подключиться")', timeout=10000)
             except Exception as e3:
                 print(f"[Bot] All methods failed: {e3}")
+
+    async def _click_continue_button(self, meeting_url: str) -> None:
+        try:
+            result = await self.page.evaluate('''() => {
+                const buttons = document.querySelectorAll('button');
+                for (let btn of buttons) {
+                    const text = btn.innerText.trim();
+                    const dataTestId = btn.getAttribute('data-testid') || '';
+                    if (text.includes('Продолжить') || dataTestId === 'orb-button') {
+                        btn.click();
+                        return 'clicked via JS: ' + (text || dataTestId);
+                    }
+                }
+                return 'not found';
+            }''')
+            print(f"[Bot] 'Продолжить в браузере' result: {result}")
+            if result == "not found":
+                raise RuntimeError("Continue button not found via JS")
+            await self.page.wait_for_selector('button:has-text("Подключиться")', timeout=10000)
+            return
+        except Exception as e1:
+            print(f"[Bot] JS method failed: {e1}")
+
+        try:
+            await self.page.click(
+                'xpath=//button[contains(text(), "Продолжить в браузере")]',
+                timeout=5000,
+            )
+            print("[Bot] Clicked 'Продолжить в браузере' via XPath")
+            await self.page.wait_for_selector('button:has-text("Подключиться")', timeout=10000)
+        except Exception as e2:
+            print(f"[Bot] All methods failed: {e2}")
 
     async def _click_ai_projects_join_button(self) -> str:
         for _ in range(60):
@@ -244,6 +280,7 @@ class TelemostBot:
             if self.require_auth:
                 raise RuntimeError(message)
             print(f"[Bot] {message}; using guest mode")
+        await self._install_timer_camera()
         self.page = await self.context.new_page()
         parsed_meeting_url = urlparse(meeting_url)
         meeting_origin = f"{parsed_meeting_url.scheme}://{parsed_meeting_url.netloc}"
@@ -317,11 +354,98 @@ class TelemostBot:
         except:
             print("[Bot] Meeting page not detected, but continuing")
 
+        self._start_meeting_timer()
+        await self._push_timer_camera_state()
         await self._mute_microphone_js()
 
         self._start_recording()
 
 
+
+    def _meeting_dir(self) -> Path:
+        if not self.session_id:
+            raise RuntimeError("session_id is required to save meeting artifacts")
+        meeting_dir = Path.cwd() / "recordings" / self.session_id
+        meeting_dir.mkdir(parents=True, exist_ok=True)
+        return meeting_dir
+
+    async def _install_timer_camera(self) -> None:
+        if not COMPOSITOR_SCRIPT_PATH.exists():
+            raise FileNotFoundError(f"Compositor script not found: {COMPOSITOR_SCRIPT_PATH}")
+        script = COMPOSITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+        await self.context.add_init_script(script)
+        print("[Bot] Timer camera compositor installed")
+
+    async def _push_timer_camera_state(self) -> None:
+        if not self.page or not self.meeting_started_at:
+            return
+
+        start_time_ms = int(self.meeting_started_at.timestamp() * 1000)
+        payload = {
+            "scene": "timer",
+            "meetingTitle": "Telemost Bot",
+            "startTimeMs": start_time_ms,
+        }
+
+        try:
+            has_compositor = await self.page.evaluate("typeof window.__COMPOSITOR__ !== 'undefined'")
+            if not has_compositor:
+                script = COMPOSITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+                await self.page.evaluate(script)
+                print("[Bot] Timer camera compositor reinjected")
+            await self.page.evaluate(
+                "(data) => window.__COMPOSITOR__ && window.__COMPOSITOR__.updateScene(data)",
+                payload,
+            )
+            print("[Bot] Timer camera state updated")
+        except Exception as e:
+            print(f"[Bot] Timer camera update failed: {e}")
+
+    @staticmethod
+    def _format_duration(total_seconds: int) -> str:
+        safe_seconds = max(0, int(total_seconds))
+        hours = safe_seconds // 3600
+        minutes = (safe_seconds % 3600) // 60
+        seconds = safe_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    def _start_meeting_timer(self) -> None:
+        if self.meeting_started_at is not None:
+            return
+        self.meeting_started_at = datetime.now(timezone.utc)
+        self.meeting_ended_at = None
+        self.meeting_duration_seconds = 0
+        self._write_meeting_time()
+        print(f"[Bot] Meeting timer started at {self.meeting_started_at.isoformat()}")
+
+    def _finish_meeting_timer(self) -> None:
+        if self.meeting_started_at is None:
+            return
+        self.meeting_ended_at = datetime.now(timezone.utc)
+        self.meeting_duration_seconds = int(
+            (self.meeting_ended_at - self.meeting_started_at).total_seconds()
+        )
+        self._write_meeting_time()
+        print(
+            "[Bot] Meeting duration: "
+            f"{self._format_duration(self.meeting_duration_seconds)}"
+        )
+
+    def _write_meeting_time(self) -> None:
+        if self.meeting_started_at is None:
+            return
+        payload = {
+            "session_id": self.session_id,
+            "started_at": self.meeting_started_at.isoformat(),
+            "ended_at": self.meeting_ended_at.isoformat() if self.meeting_ended_at else None,
+            "duration_seconds": self.meeting_duration_seconds,
+            "duration_formatted": self._format_duration(self.meeting_duration_seconds),
+        }
+        path = self._meeting_dir() / "meeting_time.json"
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _start_recording(self):
         """Запускает запись аудио в фоновом потоке."""
@@ -371,6 +495,7 @@ class TelemostBot:
 
     async def leave(self):
         """Закрывает браузер и завершает запись."""
+        self._finish_meeting_timer()
         self._stop_recording()
 
         if self.page:
@@ -430,3 +555,13 @@ class TelemostBot:
         # Сохраняем максимальное количество участников в конфиг для транскрипции
         config["max_participants"] = max_participants
         await self.leave()
+        config["meeting_started_at"] = (
+            self.meeting_started_at.isoformat() if self.meeting_started_at else None
+        )
+        config["meeting_ended_at"] = (
+            self.meeting_ended_at.isoformat() if self.meeting_ended_at else None
+        )
+        config["meeting_duration_seconds"] = self.meeting_duration_seconds
+        config["meeting_duration_formatted"] = self._format_duration(
+            self.meeting_duration_seconds
+        )

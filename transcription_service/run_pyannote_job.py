@@ -57,6 +57,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--poll-seconds", type=int, default=10, help="Polling interval in seconds")
     parser.add_argument("--timeout-seconds", type=int, default=1800, help="Overall timeout in seconds")
+    parser.add_argument(
+        "--http-timeout-seconds",
+        type=int,
+        default=int(os.getenv("PYANNOTE_HTTP_TIMEOUT_SECONDS", "180")),
+        help="HTTP read timeout for pyannote API requests.",
+    )
     parser.add_argument("--media-url", default="media://telemost/test-audio.mp3", help="Remote media URL alias in pyannote")
     parser.add_argument(
         "--from-job-json",
@@ -66,14 +72,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def request_json(url: str, api_key: str, payload: dict | None = None) -> dict:
+def request_json(
+    url: str,
+    api_key: str,
+    payload: dict | None = None,
+    *,
+    timeout_seconds: int = 180,
+) -> dict:
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     headers = {"Authorization": f"Bearer {api_key}"}
     if body is not None:
         headers["Content-Type"] = "application/json"
 
     req = urllib.request.Request(url, data=body, headers=headers)
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -331,18 +343,32 @@ def main() -> int:
     if not audio_path.exists():
         raise SystemExit(f"Audio file not found: {audio_path}")
 
-    signed = request_json(f"{API_BASE}/media/input", api_key, {"url": args.media_url})
+    signed = request_json(
+        f"{API_BASE}/media/input",
+        api_key,
+        {"url": args.media_url},
+        timeout_seconds=args.http_timeout_seconds,
+    )
     upload_file(audio_path, signed["url"])
     print("Upload completed.")
 
     request_payload = build_diarize_payload(args)
-    created = request_json(f"{API_BASE}/diarize", api_key, request_payload)
+    created = request_json(
+        f"{API_BASE}/diarize",
+        api_key,
+        request_payload,
+        timeout_seconds=args.http_timeout_seconds,
+    )
     job_id = created["jobId"]
     print(f"Job created: {job_id}")
 
     started_at = time.time()
     while time.time() - started_at < args.timeout_seconds:
-        job = request_json(f"{API_BASE}/jobs/{job_id}", api_key)
+        job = request_json(
+            f"{API_BASE}/jobs/{job_id}",
+            api_key,
+            timeout_seconds=args.http_timeout_seconds,
+        )
         status = str(job.get("status", "")).lower()
         print(f"Job status: {job.get('status')}")
 

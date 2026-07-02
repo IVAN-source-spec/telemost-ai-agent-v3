@@ -29,6 +29,12 @@ async def process_task(task_data):
             "session_id": session_id,
         }
         await bot.run(meeting_url, config)
+        meeting_time_result = {
+            "meeting_started_at": config.get("meeting_started_at"),
+            "meeting_ended_at": config.get("meeting_ended_at"),
+            "meeting_duration_seconds": config.get("meeting_duration_seconds", 0),
+            "meeting_duration_formatted": config.get("meeting_duration_formatted", "00:00:00"),
+        }
  
         # === АСИНХРОННАЯ ТРАНСКРИБАЦИЯ ===
         audio_file = Path.cwd() / "recordings" / session_id / f"recording_{session_id}.wav"
@@ -46,7 +52,8 @@ async def process_task(task_data):
             if not api_key:
                 print("[Worker] PYANNOTE_API_KEY not set, skipping transcription")
                 update_task_status(session_id, "completed", result={
-                    "message": "Meeting finished, transcription skipped (no API key)"
+                    "message": "Meeting finished, transcription skipped (no API key)",
+                    **meeting_time_result,
                 })
             else:
                 try:
@@ -76,7 +83,8 @@ async def process_task(task_data):
                     update_task_status(session_id, "completed", result={
                         "message": "Meeting finished, transcription pending",
                         "transcription_job_id": job_id,
-                        "status": "pending"
+                        "status": "pending",
+                        **meeting_time_result,
                     })
                     print(f"[Worker] Transcription submitted for {session_id}, job_id: {job_id}")
  
@@ -84,11 +92,13 @@ async def process_task(task_data):
                     print(f"[Worker] Failed to submit transcription: {e}")
                     update_task_status(session_id, "completed", result={
                         "message": "Meeting finished, transcription submission failed",
-                        "error": str(e)
+                        "error": str(e),
+                        **meeting_time_result,
                     })
         else:
             update_task_status(session_id, "completed", result={
-                "message": "Meeting finished successfully (no audio)"
+                "message": "Meeting finished successfully (no audio)",
+                **meeting_time_result,
             })
             print(f"[Worker] Task {session_id} completed (no audio)")
  
