@@ -63,7 +63,7 @@ def create_session_artifact(
     owner_repo: str,
     issued_at: str,
     secret_key: str,
-    ttl_seconds: int = 300,
+    ttl_seconds: int = 2592000,
 ) -> dict[str, str]:
     _validate_secret_key(secret_key)
     if not session_id or not SESSION_ID_PATTERN.fullmatch(session_id):

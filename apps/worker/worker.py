@@ -16,7 +16,12 @@ async def process_task(task_data):
  
     try:
         # === ЗАПУСК БОТА ===
-        bot = TelemostBot(headless=False)
+        bot_headless = os.getenv("TELEMOST_BOT_HEADLESS", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        bot = TelemostBot(headless=bot_headless)
         config = {
             "alone_leave_threshold": 20,  # 2 минуты
             "max_reconnect_attempts": 3,
