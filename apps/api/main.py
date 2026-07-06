@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from apps.api.routers.auth import auth_router
+from apps.api.routers.bots import bots_router
 from apps.api.routers.config import config_router
 from apps.api.routers.dashboard import dashboard_router
 from apps.api.routers.healts import health_router
@@ -53,6 +54,9 @@ app.include_router(
 )
 app.include_router(
     router=dashboard_router
+)
+app.include_router(
+    router=bots_router
 )
 app.include_router(
     router=meetings_router

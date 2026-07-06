@@ -30,9 +30,20 @@ async def schedule_session(
     if bot is None:
         raise RuntimeError("No idle bot available")
 
-    handoff = SchedulerQueueHandoff(session_id=session_id, bot_id=bot.bot_id, meeting_url=meeting_url)
-    result = await queue_publisher.publish(QueuePublishRequest(queue_name=queue_name, payload=handoff))
+    if hasattr(selector, "assign_session"):
+        await selector.assign_session(bot.bot_id, session_id, meeting_url)
+
+    try:
+        handoff = SchedulerQueueHandoff(session_id=session_id, bot_id=bot.bot_id, meeting_url=meeting_url)
+        result = await queue_publisher.publish(QueuePublishRequest(queue_name=queue_name, payload=handoff))
+    except Exception:
+        if hasattr(selector, "release_bot"):
+            await selector.release_bot(bot.bot_id)
+        raise
+
     if not result.accepted:
+        if hasattr(selector, "release_bot"):
+            await selector.release_bot(bot.bot_id)
         raise RuntimeError("Queue rejected handoff")
 
     metadata_store.persist(artifact_metadata)

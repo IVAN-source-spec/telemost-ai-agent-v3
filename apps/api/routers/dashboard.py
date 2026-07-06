@@ -1,4 +1,6 @@
 from fastapi import APIRouter
+from fastapi.responses import HTMLResponse
+from pathlib import Path
 from ..schemas import DashboardResponse
 from apps.web.dashboard import build_dashboard_state
 
@@ -18,3 +20,9 @@ async def get_dashboard():
         summary=state["summary"],
         reconnect_policy=state["reconnect_policy"],
     )
+
+
+@dashboard_router.get("/ui", response_class=HTMLResponse)
+async def dashboard_ui():
+    dashboard_path = Path(__file__).resolve().parents[2] / "web" / "static" / "dashboard.html"
+    return dashboard_path.read_text(encoding="utf-8")

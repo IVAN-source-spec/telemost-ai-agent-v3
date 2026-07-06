@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telemost Bot Pool</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #f4f6f8;
+      color: #20242d;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: #f4f6f8;
+    }
+    .shell {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-end;
+      margin-bottom: 24px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 30px;
+      line-height: 1.15;
+      font-weight: 750;
+    }
+    .muted {
+      color: #687080;
+      font-size: 14px;
+    }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .quick-start {
+      background: #ffffff;
+      border: 1px solid #dfe4ea;
+      border-radius: 8px;
+      box-shadow: 0 1px 2px rgba(20, 31, 45, 0.04);
+      padding: 18px;
+      margin-bottom: 20px;
+    }
+    .quick-start h2 {
+      margin: 0 0 12px;
+      font-size: 20px;
+      line-height: 1.2;
+    }
+    .quick-grid {
+      display: grid;
+      grid-template-columns: minmax(260px, 1.4fr) minmax(180px, 0.8fr) auto;
+      gap: 10px;
+      align-items: start;
+    }
+    .metric,
+    .bot-card {
+      background: #ffffff;
+      border: 1px solid #dfe4ea;
+      border-radius: 8px;
+      box-shadow: 0 1px 2px rgba(20, 31, 45, 0.04);
+    }
+    .metric {
+      padding: 16px;
+    }
+    .metric-value {
+      font-size: 30px;
+      font-weight: 760;
+      margin-top: 4px;
+    }
+    .bots {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 14px;
+    }
+    .bot-card {
+      padding: 16px;
+      border-left-width: 7px;
+    }
+    .bot-card.idle {
+      border-left-color: #26a269;
+    }
+    .bot-card.busy {
+      border-left-color: #1c71d8;
+    }
+    .bot-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .bot-id {
+      font-size: 18px;
+      font-weight: 720;
+    }
+    .badge {
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+    .badge.idle {
+      background: #dff5ea;
+      color: #137144;
+    }
+    .badge.busy {
+      background: #e1efff;
+      color: #0b5cad;
+    }
+    dl {
+      display: grid;
+      grid-template-columns: 88px 1fr;
+      gap: 8px 12px;
+      margin: 0;
+      font-size: 14px;
+    }
+    dt {
+      color: #687080;
+    }
+    dd {
+      margin: 0;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    a {
+      color: #0b5cad;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    form {
+      display: grid;
+      gap: 8px;
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid #e5e9ef;
+    }
+    input {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid #cbd3dc;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: inherit;
+      background: #ffffff;
+      color: #20242d;
+    }
+    input:focus {
+      outline: 2px solid #9bc8ff;
+      outline-offset: 1px;
+      border-color: #4b9cf3;
+    }
+    button {
+      min-height: 38px;
+      border: 0;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font: inherit;
+      font-weight: 700;
+      background: #1c71d8;
+      color: #ffffff;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #155eb8;
+    }
+    button:disabled {
+      cursor: not-allowed;
+      background: #aab4c0;
+    }
+    .form-message {
+      min-height: 18px;
+      font-size: 13px;
+      color: #687080;
+    }
+    .form-message.error {
+      color: #b42318;
+    }
+    .empty {
+      padding: 28px;
+      text-align: center;
+      color: #687080;
+      background: #ffffff;
+      border: 1px dashed #cbd3dc;
+      border-radius: 8px;
+    }
+    @media (max-width: 720px) {
+      header {
+        display: block;
+      }
+      .quick-grid {
+        grid-template-columns: 1fr;
+      }
+      .summary {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <h1>Пул ботов Telemost</h1>
+        <div class="muted">Статусы обновляются автоматически</div>
+      </div>
+      <div class="muted" id="updated">Ожидание данных...</div>
+    </header>
+
+    <section class="summary" aria-label="Сводка">
+      <div class="metric">
+        <div class="muted">Всего ботов</div>
+        <div class="metric-value" id="total">0</div>
+      </div>
+      <div class="metric">
+        <div class="muted">Свободны</div>
+        <div class="metric-value" id="idle">0</div>
+      </div>
+      <div class="metric">
+        <div class="muted">Заняты</div>
+        <div class="metric-value" id="busy">0</div>
+      </div>
+    </section>
+
+    <section class="quick-start" aria-label="Быстрый запуск встречи">
+      <h2>Быстрый запуск</h2>
+      <form id="quick-start-form">
+        <div class="quick-grid">
+          <input name="meeting_url" type="url" placeholder="Ссылка на встречу" required>
+          <input name="title" type="text" placeholder="Название, необязательно">
+          <button type="submit">Запустить</button>
+        </div>
+        <div class="form-message" id="quick-start-message"></div>
+      </form>
+    </section>
+
+    <section class="bots" id="bots" aria-label="Боты"></section>
+  </main>
+
+  <script>
+    const botsNode = document.getElementById("bots");
+    const totalNode = document.getElementById("total");
+    const idleNode = document.getElementById("idle");
+    const busyNode = document.getElementById("busy");
+    const updatedNode = document.getElementById("updated");
+    const quickStartForm = document.getElementById("quick-start-form");
+    const quickStartMessage = document.getElementById("quick-start-message");
+
+    function fmt(value) {
+      if (!value) return "-";
+      return value;
+    }
+
+    function statusText(status) {
+      return status === "busy" ? "занят" : "свободен";
+    }
+
+    function render(data) {
+      const summary = data.summary || {};
+      const bots = data.bots || [];
+      totalNode.textContent = summary.total ?? bots.length;
+      idleNode.textContent = summary.idle ?? 0;
+      busyNode.textContent = summary.busy ?? 0;
+      updatedNode.textContent = `Обновлено: ${new Date().toLocaleTimeString("ru-RU")}`;
+
+      if (!bots.length) {
+        botsNode.innerHTML = '<div class="empty">Боты пока не найдены</div>';
+        return;
+      }
+
+      botsNode.innerHTML = bots.map((bot) => {
+        const status = bot.status || "idle";
+        const meeting = bot.meeting_url
+          ? `<a href="${bot.meeting_url}" target="_blank" rel="noreferrer">${bot.meeting_url}</a>`
+          : "-";
+        const form = status === "idle" ? `
+          <form data-bot-id="${bot.bot_id}">
+            <input name="meeting_url" type="url" placeholder="Ссылка на встречу" required>
+            <input name="title" type="text" placeholder="Название встречи, необязательно">
+            <button type="submit">Запустить</button>
+            <div class="form-message" data-message-for="${bot.bot_id}"></div>
+          </form>
+        ` : "";
+        return `
+          <article class="bot-card ${status}">
+            <div class="bot-top">
+              <div class="bot-id">${fmt(bot.bot_id)}</div>
+              <div class="badge ${status}">${statusText(status)}</div>
+            </div>
+            <dl>
+              <dt>Название</dt>
+              <dd>${fmt(bot.title)}</dd>
+              <dt>Встреча</dt>
+              <dd>${fmt(bot.session_id)}</dd>
+              <dt>Ссылка</dt>
+              <dd>${meeting}</dd>
+              <dt>Старт</dt>
+              <dd>${fmt(bot.started_at)}</dd>
+            </dl>
+            ${form}
+          </article>
+        `;
+      }).join("");
+
+      for (const form of botsNode.querySelectorAll("form[data-bot-id]")) {
+        form.addEventListener("submit", submitMeeting);
+      }
+    }
+
+    async function submitMeeting(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const botId = form.dataset.botId;
+      const button = form.querySelector("button");
+      const message = form.querySelector(".form-message");
+      const formData = new FormData(form);
+      const payload = {
+        meeting_url: String(formData.get("meeting_url") || "").trim(),
+        title: String(formData.get("title") || "").trim() || null
+      };
+
+      button.disabled = true;
+      message.className = "form-message";
+      message.textContent = "Отправляю встречу...";
+
+      try {
+        const response = await fetch(`/api/v1/bots/${encodeURIComponent(botId)}/meetings`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        message.textContent = `Создана задача ${data.task_id}`;
+        await refresh();
+      } catch (error) {
+        message.className = "form-message error";
+        message.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function submitQuickStart(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const button = form.querySelector("button");
+      const formData = new FormData(form);
+      const payload = {
+        meeting_url: String(formData.get("meeting_url") || "").trim(),
+        title: String(formData.get("title") || "").trim() || null
+      };
+
+      button.disabled = true;
+      quickStartMessage.className = "form-message";
+      quickStartMessage.textContent = "Ищу свободного бота...";
+
+      try {
+        const response = await fetch("/api/v1/bots/meetings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+        quickStartMessage.textContent = `Задача ${data.task_id} отправлена на ${data.bot_id}`;
+        form.reset();
+        await refresh();
+      } catch (error) {
+        quickStartMessage.className = "form-message error";
+        quickStartMessage.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function refresh() {
+      try {
+        const response = await fetch("/api/v1/bots/", { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        render(await response.json());
+      } catch (error) {
+        updatedNode.textContent = `Ошибка обновления: ${error.message}`;
+      }
+    }
+
+    quickStartForm.addEventListener("submit", submitQuickStart);
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>

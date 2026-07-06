@@ -482,24 +482,65 @@ class TelemostBot:
     async def get_participant_count(self) -> int:
         """Возвращает количество других участников на встрече (исключая бота)."""
         try:
-            count = await self.page.evaluate('''() => {    
-                // 3. Если ничего не нашли, считаем видео-элементы
+            result = await self.page.evaluate('''() => {
+                // === 1. Ищем число участников в интерфейсе ===
+                const allElements = document.querySelectorAll('*');
+                const patterns = [
+                    /Участники\s*[:.]?\s*(\d+)/i,
+                    /Участник\s*[:.]?\s*(\d+)/i,
+                    /Participants\s*[:.]?\s*(\d+)/i,
+                    /Participant\s*[:.]?\s*(\d+)/i,
+                ];
+                
+                let interfaceCount = null;
+                for (const el of allElements) {
+                    const text = el.textContent || '';
+                    for (const pattern of patterns) {
+                        const match = text.match(pattern);
+                        if (match) {
+                            interfaceCount = parseInt(match[1], 10);
+                            break;
+                        }
+                    }
+                    if (interfaceCount !== null) break;
+                }
+                
+                // === 2. Проверяем, вошёл ли бот (есть ли его видео) ===
+                const hasSelfVideo = !!document.querySelector(
+                    '[class*="self"] video, ' +
+                    '[class*="local"] video, ' +
+                    '[data-is-me="true"] video'
+                );
+                
+                // === 3. Считаем видео-элементы других участников (fallback) ===
                 const videos = document.querySelectorAll('video');
-                let count = 0;
-                for (let vid of videos) {
-                    // Исключаем видео бота (обычно оно имеет класс local или находится в элементе с class="self")
-                    const parent = vid.closest('[class*="self"], [class*="local"]');
+                let videoCount = 0;
+                for (const vid of videos) {
+                    const parent = vid.closest('[class*="self"], [class*="local"], [data-is-me="true"]');
                     if (!parent) {
-                        count++;
+                        videoCount++;
                     }
                 }
-                return count;
+                
+                // === 4. Принимаем решение ===
+                let count = 0;
+                if (interfaceCount !== null) {
+                    // Если нашли число в интерфейсе — вычитаем бота (если он вошёл)
+                    count = interfaceCount - (hasSelfVideo ? 1 : 0);
+                } else {
+                    // Fallback: используем количество видео
+                    count = videoCount;
+                }
+                
+                return Math.max(0, count);
             }''')
-            self._print(f"[Bot] Other participants count: {count}")
-            return count
+            
+            print(f"[Bot] Other participants count: {result}")
+            return result
+            
         except Exception as e:
-            self._print(f"[Bot] Could not get participant count: {e}")
-            return 0  # Возвращаем 0, чтобы бот начал отсчёт одиночества
+            print(f"[Bot] Could not get participant count: {e}")
+            return 0
 
     async def leave(self):
         """Закрывает браузер и завершает запись."""

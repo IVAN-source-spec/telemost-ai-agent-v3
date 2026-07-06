@@ -9,6 +9,11 @@ class CreateMeetingRequest(BaseModel):
     artifact_kind: Optional[str] = "audio"
 
 
+class BotMeetingRequest(BaseModel):
+    meeting_url: str
+    title: Optional[str] = None
+
+
 class TaskResponse(BaseModel):
     task_id: str
     status: str
