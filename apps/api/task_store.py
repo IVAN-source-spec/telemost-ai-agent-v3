@@ -1,6 +1,7 @@
 import datetime
 from typing import Dict, Optional
 from pathlib import Path
+from core.storage.meeting_storage import get_meeting_storage
 
 _task_store: Dict[str, dict] = {}
 
@@ -24,7 +25,8 @@ def get_task(task_id: str) -> Optional[dict]:
     return _task_store.get(task_id)
 
 def get_meeting_dir(session_id: str) -> Path:
-    recordings_dir = Path.cwd() / "recordings"
-    meeting_dir = recordings_dir / session_id
-    meeting_dir.mkdir(parents=True, exist_ok=True)
-    return meeting_dir
+    recordings_dir = get_meeting_storage().recordings_dir
+    candidates = sorted(recordings_dir.glob(f"*/*/*/*{session_id}*"))
+    if candidates:
+        return candidates[-1]
+    raise FileNotFoundError(f"Meeting directory not found for {session_id}")

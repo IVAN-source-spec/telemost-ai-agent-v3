@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.transcription.adapter import TranscriptionAdapter
+from core.storage.meeting_storage import get_meeting_storage
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
         "meeting",
         help=(
             "Meeting id like meeting-5, path to a meeting directory, "
-            "or path to recording_meeting-5.wav."
+            "or path to recording_meeting.wav."
         ),
     )
     parser.add_argument(
@@ -46,20 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def resolve_audio_path(value: str) -> Path:
-    raw_path = Path(value).expanduser()
-    if raw_path.is_file():
-        return raw_path.resolve()
-
-    if raw_path.is_dir():
-        meeting_dir = raw_path.resolve()
-    else:
-        meeting_dir = PROJECT_ROOT / "recordings" / value
-
-    meeting_id = meeting_dir.name
-    audio_path = meeting_dir / f"recording_{meeting_id}.wav"
-    if not audio_path.exists():
-        raise FileNotFoundError(f"Recording not found: {audio_path}")
-    return audio_path.resolve()
+    return get_meeting_storage(PROJECT_ROOT).resolve_retry_audio_path(value)
 
 
 def move_existing_results(audio_path: Path) -> None:

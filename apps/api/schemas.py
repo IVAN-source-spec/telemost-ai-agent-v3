@@ -5,6 +5,7 @@ from typing import Optional
 class CreateMeetingRequest(BaseModel):
     session_id: str
     meeting_url: str
+    title: Optional[str] = None
     artifact_uri: Optional[str] = None
     artifact_kind: Optional[str] = "audio"
 

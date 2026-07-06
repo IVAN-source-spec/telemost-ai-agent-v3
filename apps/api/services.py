@@ -16,6 +16,7 @@ async def create_meeting_task(
     result = await schedule_session(
         session_id=request.session_id,
         meeting_url=request.meeting_url,
+        title=request.title,
         queue_name="meetings",
         selector=selector,
         queue_publisher=queue_publisher,

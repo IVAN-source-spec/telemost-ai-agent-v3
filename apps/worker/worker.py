@@ -14,6 +14,7 @@ async def process_task(task_data):
     session_id = task_data.session_id
     bot_id = task_data.bot_id
     meeting_url = task_data.meeting_url
+    title = getattr(task_data, "title", None)
     print(f"[Worker] Processing task: {session_id} ({bot_id}) -> {meeting_url}")
 
     update_task_status(session_id, "running")
@@ -30,6 +31,7 @@ async def process_task(task_data):
             "max_reconnect_attempts": 3,
             "reconnect_interval_sec": 10,
             "session_id": session_id,
+            "title": title,
         }
         await bot.run(meeting_url, config)
 
@@ -38,10 +40,12 @@ async def process_task(task_data):
             "meeting_ended_at": config.get("meeting_ended_at"),
             "meeting_duration_seconds": config.get("meeting_duration_seconds", 0),
             "meeting_duration_formatted": config.get("meeting_duration_formatted", "00:00:00"),
+            "meeting_dir": config.get("meeting_dir"),
+            "audio_path": config.get("audio_path"),
         }
 
-        audio_file = Path.cwd() / "recordings" / session_id / f"recording_{session_id}.wav"
-        if audio_file.exists():
+        audio_file = Path(config["audio_path"]) if config.get("audio_path") else None
+        if audio_file and audio_file.exists():
             target_speakers = config.get("max_participants", 1)
             if target_speakers == 0:
                 target_speakers = 1

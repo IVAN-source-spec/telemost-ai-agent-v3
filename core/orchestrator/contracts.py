@@ -28,6 +28,7 @@ class SchedulerQueueHandoff:
     session_id: str
     bot_id: str
     meeting_url: str
+    title: str | None = None
 
 @dataclass(frozen=True)
 class SessionArtifactMetadata:

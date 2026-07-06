@@ -11,6 +11,7 @@ from core.recording.audio_recorder import AudioRecorder
 from pathlib import Path
 from datetime import datetime, timezone
 from core.constants import USER_AGENT, VIEWPORT, CHROMIUM_ARGS
+from core.storage.meeting_storage import MeetingArtifacts, get_meeting_storage
 
 DEFAULT_STORAGE_STATE_PATH = "data/auth/yandex-session.json"
 DEFAULT_COOKIES_PATH = "data/auth/cookies.json"
@@ -36,6 +37,8 @@ class TelemostBot:
         self._playwright = None
         self.recorder = None
         self.session_id = None
+        self.meeting_title = None
+        self.meeting_artifacts: MeetingArtifacts | None = None
         self.meeting_started_at = None
         self.meeting_ended_at = None
         self.meeting_duration_seconds = 0
@@ -368,14 +371,22 @@ class TelemostBot:
 
         self._start_recording()
 
-
-
     def _meeting_dir(self) -> Path:
+        return self._meeting_artifacts().meeting_dir
+
+    def _meeting_artifacts(self) -> MeetingArtifacts:
+        if self.meeting_artifacts is not None:
+            return self.meeting_artifacts
         if not self.session_id:
             raise RuntimeError("session_id is required to save meeting artifacts")
-        meeting_dir = Path.cwd() / "recordings" / self.session_id
-        meeting_dir.mkdir(parents=True, exist_ok=True)
-        return meeting_dir
+        if self.meeting_started_at is None:
+            raise RuntimeError("meeting_started_at is required to save meeting artifacts")
+        self.meeting_artifacts = get_meeting_storage().prepare_meeting(
+            session_id=self.session_id,
+            title=self.meeting_title,
+            started_at_utc=self.meeting_started_at,
+        )
+        return self.meeting_artifacts
 
     async def _install_timer_camera(self) -> None:
         if not COMPOSITOR_SCRIPT_PATH.exists():
@@ -444,12 +455,14 @@ class TelemostBot:
             return
         payload = {
             "session_id": self.session_id,
+            "title": self._meeting_artifacts().title,
             "started_at": self.meeting_started_at.isoformat(),
+            "started_at_astrakhan": self._meeting_artifacts().started_at_local.isoformat(),
             "ended_at": self.meeting_ended_at.isoformat() if self.meeting_ended_at else None,
             "duration_seconds": self.meeting_duration_seconds,
             "duration_formatted": self._format_duration(self.meeting_duration_seconds),
         }
-        path = self._meeting_dir() / "meeting_time.json"
+        path = self._meeting_artifacts().meeting_time_path
         path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -467,10 +480,7 @@ class TelemostBot:
             return
         self.recorder.stop()
         if self.session_id:
-            # Создаём папку для встречи
-            meeting_dir = Path.cwd() / "recordings" / self.session_id
-            meeting_dir.mkdir(parents=True, exist_ok=True)
-            filename = meeting_dir / f"recording_{self.session_id}.wav"
+            filename = self._meeting_artifacts().audio_path
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"recording_{timestamp}.wav"
@@ -491,7 +501,7 @@ class TelemostBot:
                     /Participants\s*[:.]?\s*(\d+)/i,
                     /Participant\s*[:.]?\s*(\d+)/i,
                 ];
-                
+
                 let interfaceCount = null;
                 for (const el of allElements) {
                     const text = el.textContent || '';
@@ -504,14 +514,14 @@ class TelemostBot:
                     }
                     if (interfaceCount !== null) break;
                 }
-                
+
                 // === 2. Проверяем, вошёл ли бот (есть ли его видео) ===
                 const hasSelfVideo = !!document.querySelector(
                     '[class*="self"] video, ' +
                     '[class*="local"] video, ' +
                     '[data-is-me="true"] video'
                 );
-                
+
                 // === 3. Считаем видео-элементы других участников (fallback) ===
                 const videos = document.querySelectorAll('video');
                 let videoCount = 0;
@@ -521,7 +531,7 @@ class TelemostBot:
                         videoCount++;
                     }
                 }
-                
+
                 // === 4. Принимаем решение ===
                 let count = 0;
                 if (interfaceCount !== null) {
@@ -531,13 +541,13 @@ class TelemostBot:
                     // Fallback: используем количество видео
                     count = videoCount;
                 }
-                
+
                 return Math.max(0, count);
             }''')
-            
+
             print(f"[Bot] Other participants count: {result}")
             return result
-            
+
         except Exception as e:
             print(f"[Bot] Could not get participant count: {e}")
             return 0
@@ -560,6 +570,7 @@ class TelemostBot:
     async def run(self, meeting_url: str, config: dict):
         """Основной цикл работы бота: вход, мониторинг, выход."""
         session_id = config.get("session_id", None)
+        self.meeting_title = config.get("title")
         await self.join(meeting_url, session_id)
 
         alone_seconds = 0
@@ -614,5 +625,7 @@ class TelemostBot:
         config["meeting_duration_formatted"] = self._format_duration(
             self.meeting_duration_seconds
         )
-
+        if self.meeting_artifacts:
+            config["meeting_dir"] = str(self.meeting_artifacts.meeting_dir)
+            config["audio_path"] = str(self.meeting_artifacts.audio_path)
 

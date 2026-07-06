@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
+from core.storage.meeting_storage import get_meeting_storage
 
 
 load_dotenv()
@@ -27,9 +28,7 @@ def write_status(status_file: Path, data: dict) -> None:
 
 
 def find_audio_files(recordings_dir: Path) -> list[Path]:
-    if not recordings_dir.exists():
-        return []
-    return sorted(recordings_dir.glob("meeting-*/recording_*.wav"))
+    return get_meeting_storage(recordings_dir.parent).find_recording_audio_files()
 
 
 def ensure_status_for_audio(audio_path: Path) -> dict:

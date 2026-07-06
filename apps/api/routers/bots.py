@@ -50,6 +50,7 @@ async def _enqueue_bot_meeting(
         session_id=session_id,
         bot_id=bot.bot_id,
         meeting_url=req.meeting_url,
+        title=title,
     )
 
     try:
