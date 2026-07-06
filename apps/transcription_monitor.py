@@ -13,6 +13,9 @@ from core.storage.meeting_storage import get_meeting_storage
 load_dotenv()
 
 
+storage = get_meeting_storage()
+
+
 def read_status(status_file: Path) -> dict | None:
     if not status_file.exists():
         return None
@@ -29,6 +32,12 @@ def write_status(status_file: Path, data: dict) -> None:
 
 def find_audio_files(recordings_dir: Path) -> list[Path]:
     return get_meeting_storage(recordings_dir.parent).find_recording_audio_files()
+
+
+async def finalize_meeting_folder(meeting_dir: Path) -> None:
+    uploaded = await asyncio.to_thread(storage.finalize_meeting_folder, meeting_dir)
+    if uploaded:
+        print(f"[TranscriptionMonitor] Meeting folder finalized: {meeting_dir}")
 
 
 def ensure_status_for_audio(audio_path: Path) -> dict:
@@ -107,6 +116,7 @@ async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: st
         data["error"] = None
         write_status(status_file, data)
         print(f"[TranscriptionMonitor] Completed {meeting_dir.name}, job_id={job_id}")
+        await finalize_meeting_folder(meeting_dir)
     except Exception as error:
         data = read_status(status_file) or status_data
         data["status"] = "failed"
@@ -134,6 +144,7 @@ async def refresh_pending_status(meeting_dir: Path, status_data: dict, api_key: 
         data["error"] = None
         write_status(status_file, data)
         print(f"[TranscriptionMonitor] Status updated for {meeting_dir.name}")
+        await finalize_meeting_folder(meeting_dir)
     elif job_status in {"failed", "error"}:
         data = read_status(status_file) or status_data
         data["status"] = "failed"

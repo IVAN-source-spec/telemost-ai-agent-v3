@@ -106,6 +106,11 @@ class MeetingStorage:
             raise RuntimeError(f"Multiple recordings found for {value}:\n{formatted}")
         return candidates[0].resolve()
 
+    def finalize_meeting_folder(self, meeting_dir: Path) -> bool:
+        from core.storage.yandex_disk import YandexDiskUploader
+
+        return YandexDiskUploader(self.root_dir).finalize_meeting_folder(meeting_dir)
+
 
 def get_meeting_storage(root_dir: Path | None = None) -> MeetingStorage:
     return MeetingStorage(root_dir=root_dir)
