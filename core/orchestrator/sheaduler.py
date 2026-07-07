@@ -21,6 +21,11 @@ async def schedule_session(
         session_id: str,
         meeting_url: str,
         title: str | None = None,
+        source: str | None = None,
+        external_event_id: str | None = None,
+        scheduled_start_at: str | None = None,
+        scheduled_end_at: str | None = None,
+        organizer: str | None = None,
         queue_name: str,
         selector: IdleBotSelector,
         queue_publisher: QueuePublisher,
@@ -40,6 +45,11 @@ async def schedule_session(
             bot_id=bot.bot_id,
             meeting_url=meeting_url,
             title=title,
+            source=source,
+            external_event_id=external_event_id,
+            scheduled_start_at=scheduled_start_at,
+            scheduled_end_at=scheduled_end_at,
+            organizer=organizer,
         )
         result = await queue_publisher.publish(QueuePublishRequest(queue_name=queue_name, payload=handoff))
     except Exception:

@@ -106,6 +106,50 @@ class MeetingStorage:
             raise RuntimeError(f"Multiple recordings found for {value}:\n{formatted}")
         return candidates[0].resolve()
 
+    @staticmethod
+    def meeting_number_from_name(name: str) -> int | None:
+        match = re.search(r"(?:^|__)meeting-(\d+)(?:__|$)", name)
+        return int(match.group(1)) if match else None
+
+    def latest_local_meeting_number_for_day(self, started_at_utc: datetime) -> int:
+        if started_at_utc.tzinfo is None:
+            started_at_utc = started_at_utc.replace(tzinfo=timezone.utc)
+        started_at_local = started_at_utc.astimezone(ASTRAKHAN_TZ)
+        day_dir = (
+            self.recordings_dir
+            / started_at_local.strftime("%Y")
+            / started_at_local.strftime("%m")
+            / started_at_local.strftime("%d")
+        )
+        if not day_dir.exists():
+            return 0
+        numbers = [
+            number
+            for path in day_dir.iterdir()
+            if path.is_dir()
+            for number in [self.meeting_number_from_name(path.name)]
+            if number is not None
+        ]
+        return max(numbers) if numbers else 0
+
+    def latest_remote_meeting_number_for_day(self, started_at_utc: datetime) -> int:
+        from core.storage.yandex_disk import YandexDiskUploader
+
+        if started_at_utc.tzinfo is None:
+            started_at_utc = started_at_utc.replace(tzinfo=timezone.utc)
+        started_at_local = started_at_utc.astimezone(ASTRAKHAN_TZ)
+        return YandexDiskUploader(self.root_dir).latest_remote_meeting_number_for_day_parts(
+            started_at_local.strftime("%Y"),
+            started_at_local.strftime("%m"),
+            started_at_local.strftime("%d"),
+        )
+
+    def next_meeting_number_for_day(self, started_at_utc: datetime | None = None) -> int:
+        started_at_utc = started_at_utc or datetime.now(timezone.utc)
+        latest_local = self.latest_local_meeting_number_for_day(started_at_utc)
+        latest_remote = self.latest_remote_meeting_number_for_day(started_at_utc)
+        return max(latest_local, latest_remote) + 1
+
     def finalize_meeting_folder(self, meeting_dir: Path) -> bool:
         from core.storage.yandex_disk import YandexDiskUploader
 

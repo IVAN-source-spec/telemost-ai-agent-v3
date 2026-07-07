@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import http.client
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -102,6 +103,26 @@ class YandexDiskClient:
     def _resource_url(self, path: str) -> str:
         return f"{API_BASE}?{urllib.parse.urlencode({'path': self._api_path(path)})}"
 
+    def get_resource(self, remote_path: str, limit: int = 1000) -> dict | None:
+        url = (
+            f"{API_BASE}?"
+            f"{urllib.parse.urlencode({'path': self._api_path(remote_path), 'limit': str(limit)})}"
+        )
+        try:
+            return self._request("GET", url)
+        except YandexDiskUploadError as error:
+            if "HTTP 404" in str(error):
+                return None
+            raise
+
+    def list_dir_names(self, remote_path: str) -> list[str]:
+        resource = self.get_resource(remote_path)
+        if not resource:
+            return []
+        embedded = resource.get("_embedded") or {}
+        items = embedded.get("items") or []
+        return [item.get("name", "") for item in items if item.get("name")]
+
     def ensure_dir(self, remote_path: str) -> None:
         normalized = self._normalize_remote_path(remote_path)
         if normalized == "/":
@@ -186,6 +207,92 @@ class YandexDiskUploader:
         base_path = YandexDiskClient._normalize_remote_path(self.config.base_path)
         return base_path + "/" + relative_path
 
+    def _remote_day_dir(self, meeting_dir: Path) -> str:
+        try:
+            relative = meeting_dir.relative_to(self.root_dir / DEFAULT_RECORDINGS_DIR)
+            parts = relative.parts
+            if len(parts) >= 3:
+                return (
+                    YandexDiskClient._normalize_remote_path(self.config.base_path)
+                    + "/"
+                    + "/".join(parts[:3])
+                )
+        except ValueError:
+            pass
+        return str(Path(self._remote_meeting_dir(meeting_dir)).parent).replace("\\", "/")
+
+    @staticmethod
+    def _meeting_number_from_name(name: str) -> int | None:
+        import re
+
+        match = re.search(r"(?:^|__)meeting-(\d+)(?:__|$)", name)
+        return int(match.group(1)) if match else None
+
+    def latest_remote_meeting_number_for_day_parts(self, year: str, month: str, day: str) -> int:
+        if not self.config.enabled or not self.config.token:
+            return 0
+        remote_day_dir = (
+            YandexDiskClient._normalize_remote_path(self.config.base_path)
+            + f"/{year}/{month}/{day}"
+        )
+        try:
+            client = YandexDiskClient(self.config.token)
+            numbers = [
+                number
+                for name in client.list_dir_names(remote_day_dir)
+                for number in [self._meeting_number_from_name(name)]
+                if number is not None
+            ]
+            return max(numbers) if numbers else 0
+        except Exception as error:
+            self._append_error(Path(f"{year}/{month}/{day}"), remote_day_dir, error)
+            return 0
+
+    def _remote_meeting_exists(self, client: YandexDiskClient, remote_dir: str) -> bool:
+        return client.get_resource(remote_dir) is not None
+
+    def _renumber_local_meeting_dir_if_needed(self, meeting_dir: Path, client: YandexDiskClient) -> Path:
+        remote_dir = self._remote_meeting_dir(meeting_dir)
+
+        remote_day_dir = self._remote_day_dir(meeting_dir)
+        names = client.list_dir_names(remote_day_dir)
+        remote_numbers = [
+            number
+            for name in names
+            for number in [self._meeting_number_from_name(name)]
+            if number is not None
+        ]
+        local_numbers = [
+            number
+            for path in meeting_dir.parent.iterdir()
+            if path.is_dir()
+            for number in [self._meeting_number_from_name(path.name)]
+            if number is not None
+        ]
+        current_number = self._meeting_number_from_name(meeting_dir.name)
+        latest_remote = max(remote_numbers) if remote_numbers else 0
+        remote_path_exists = self._remote_meeting_exists(client, remote_dir)
+
+        if current_number and current_number > latest_remote and not remote_path_exists:
+            return meeting_dir
+
+        next_number = max(remote_numbers + local_numbers + [0]) + 1
+        new_name = re.sub(
+            r"(?:^|__)meeting-\d+(?=__|$)",
+            lambda match: match.group(0).replace(
+                re.search(r"meeting-\d+", match.group(0)).group(0),
+                f"meeting-{next_number}",
+            ),
+            meeting_dir.name,
+            count=1,
+        )
+        if new_name == meeting_dir.name:
+            new_name = f"{meeting_dir.name}__meeting-{next_number}"
+        new_dir = meeting_dir.with_name(new_name)
+        meeting_dir.rename(new_dir)
+        print(f"[YandexDisk] Renamed local meeting folder before upload: {meeting_dir} -> {new_dir}")
+        return new_dir
+
     def _append_error(self, meeting_dir: Path, remote_dir: str, error: Exception) -> None:
         self.config.errors_file.parent.mkdir(parents=True, exist_ok=True)
         record = {
@@ -209,6 +316,8 @@ class YandexDiskUploader:
         remote_dir = self._remote_meeting_dir(meeting_dir)
         try:
             client = YandexDiskClient(self.config.token)
+            meeting_dir = self._renumber_local_meeting_dir_if_needed(meeting_dir, client)
+            remote_dir = self._remote_meeting_dir(meeting_dir)
             uploaded_files = client.upload_folder(meeting_dir, remote_dir)
             if uploaded_files <= 0:
                 raise YandexDiskUploadError(f"No files uploaded from {meeting_dir}")

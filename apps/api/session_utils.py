@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from core.storage.meeting_storage import get_meeting_storage
  
 def get_next_meeting_number(recordings_dir: Path) -> int:
     """
@@ -22,6 +23,5 @@ def generate_session_id() -> str:
     """
     Генерирует следующий session_id в формате meeting-<номер>.
     """
-    recordings_dir = Path.cwd() / "recordings"
-    next_num = get_next_meeting_number(recordings_dir)
+    next_num = get_meeting_storage().next_meeting_number_for_day()
     return f"meeting-{next_num}"

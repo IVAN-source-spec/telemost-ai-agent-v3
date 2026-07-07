@@ -6,6 +6,7 @@ from apps.api.routers.config import config_router
 from apps.api.routers.dashboard import dashboard_router
 from apps.api.routers.healts import health_router
 from apps.api.routers.meetings import meetings_router
+from apps.api.routers.node import node_router
 
 
 @asynccontextmanager
@@ -60,6 +61,9 @@ app.include_router(
 )
 app.include_router(
     router=meetings_router
+)
+app.include_router(
+    router=node_router
 )
 
 

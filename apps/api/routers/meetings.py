@@ -2,8 +2,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..schemas import CreateMeetingRequest, TaskResponse, TaskStatusResponse
 from ..services import create_meeting_task
 from ..dependencies import get_queue_publisher, get_bot_selector, get_metadata_store
-from ..task_store import create_task, get_task
+from ..task_store import create_task, get_task, get_task_by_external_event_id, list_tasks
 from ..session_utils import generate_session_id
+from ..security import require_node_api_token
 
 meetings_router = APIRouter(prefix="/api/v1/meetings", tags=["meetings"])
 
@@ -11,23 +12,48 @@ meetings_router = APIRouter(prefix="/api/v1/meetings", tags=["meetings"])
 @meetings_router.post("/", response_model=TaskResponse)
 async def create_meeting(
         req: CreateMeetingRequest,
+        _auth=Depends(require_node_api_token),
         queue_publisher=Depends(get_queue_publisher),
         bot_selector=Depends(get_bot_selector),
         metadata_store=Depends(get_metadata_store),
 ):
+    existing = get_task_by_external_event_id(req.external_event_id)
+    if existing is not None:
+        return TaskResponse(
+            task_id=existing["task_id"],
+            status=existing["status"],
+            bot_id=(existing.get("metadata") or {}).get("bot_id"),
+            queue_message_id=(existing.get("metadata") or {}).get("queue_message_id"),
+        )
+
     if not req.session_id or req.session_id == "auto" or req.session_id == "string":
         req.session_id = generate_session_id()
         print(f"[API] Auto-generated session_id: {req.session_id}")
     try:
         response = await create_meeting_task(req, bot_selector, queue_publisher, metadata_store)
-        create_task(response.task_id, status="queued")
+        create_task(response.task_id, status="queued", metadata={
+            "bot_id": response.bot_id,
+            "queue_message_id": response.queue_message_id,
+            "meeting_url": req.meeting_url,
+            "title": req.title,
+            "source": req.source,
+            "external_event_id": req.external_event_id,
+            "scheduled_start_at": req.scheduled_start_at,
+            "scheduled_end_at": req.scheduled_end_at,
+            "organizer": req.organizer,
+        })
         return response
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
 
+@meetings_router.get("/")
+async def list_meeting_tasks(_auth=Depends(require_node_api_token)):
+    return {"tasks": list_tasks()}
+
+
 @meetings_router.get("/{task_id}", response_model=TaskStatusResponse)
-async def get_task_status(task_id: str):
+async def get_task_status(task_id: str, _auth=Depends(require_node_api_token)):
     data = get_task(task_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -36,4 +62,6 @@ async def get_task_status(task_id: str):
         status=data["status"],
         result=data.get("result"),
         created_at=data["created_at"],
+        metadata=data.get("metadata"),
     )
+

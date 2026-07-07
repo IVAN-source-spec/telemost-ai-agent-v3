@@ -6,6 +6,11 @@ class CreateMeetingRequest(BaseModel):
     session_id: str
     meeting_url: str
     title: Optional[str] = None
+    source: Optional[str] = None
+    external_event_id: Optional[str] = None
+    scheduled_start_at: Optional[str] = None
+    scheduled_end_at: Optional[str] = None
+    organizer: Optional[str] = None
     artifact_uri: Optional[str] = None
     artifact_kind: Optional[str] = "audio"
 
@@ -13,6 +18,11 @@ class CreateMeetingRequest(BaseModel):
 class BotMeetingRequest(BaseModel):
     meeting_url: str
     title: Optional[str] = None
+    source: Optional[str] = None
+    external_event_id: Optional[str] = None
+    scheduled_start_at: Optional[str] = None
+    scheduled_end_at: Optional[str] = None
+    organizer: Optional[str] = None
 
 
 class TaskResponse(BaseModel):
@@ -27,6 +37,7 @@ class TaskStatusResponse(BaseModel):
     status: str
     result: Optional[dict] = None
     created_at: str
+    metadata: Optional[dict] = None
 
 
 class ReconnectConfigRequest(BaseModel):

@@ -6,18 +6,32 @@ from core.orchestrator.contracts import (
     SessionArtifactMetadata,
 )
 from ..dependencies import get_bot_selector, get_metadata_store, get_queue_publisher
+from ..node_config import get_global_bot_id, get_node_id, get_node_name
+from ..security import require_node_api_token
 from ..schemas import BotMeetingRequest, TaskResponse
 from ..session_utils import generate_session_id
-from ..task_store import create_task
+from ..task_store import create_task, get_task_by_external_event_id
 
 bots_router = APIRouter(prefix="/api/v1/bots", tags=["bots"])
 
 
 @bots_router.get("/")
-async def list_bots(bot_selector=Depends(get_bot_selector)):
+async def list_bots(_auth=Depends(require_node_api_token), bot_selector=Depends(get_bot_selector)):
     bots = []
     if hasattr(bot_selector, "list_bots"):
         bots = await bot_selector.list_bots()
+
+    node_id = get_node_id()
+    node_name = get_node_name()
+    bots = [
+        {
+            **bot,
+            "node_id": node_id,
+            "node_name": node_name,
+            "global_bot_id": get_global_bot_id(bot["bot_id"]),
+        }
+        for bot in bots
+    ]
 
     busy = sum(1 for bot in bots if bot.get("status") == "busy")
     idle = sum(1 for bot in bots if bot.get("status") == "idle")
@@ -27,6 +41,8 @@ async def list_bots(bot_selector=Depends(get_bot_selector)):
             "total": len(bots),
             "busy": busy,
             "idle": idle,
+            "node_id": node_id,
+            "node_name": node_name,
         },
         "bots": bots,
     }
@@ -40,6 +56,15 @@ async def _enqueue_bot_meeting(
     queue_publisher,
     metadata_store,
 ) -> TaskResponse:
+    existing = get_task_by_external_event_id(req.external_event_id)
+    if existing is not None:
+        return TaskResponse(
+            task_id=existing["task_id"],
+            status=existing["status"],
+            bot_id=(existing.get("metadata") or {}).get("bot_id"),
+            queue_message_id=(existing.get("metadata") or {}).get("queue_message_id"),
+        )
+
     session_id = generate_session_id()
     title = req.title.strip() if req.title and req.title.strip() else session_id
 
@@ -51,6 +76,11 @@ async def _enqueue_bot_meeting(
         bot_id=bot.bot_id,
         meeting_url=req.meeting_url,
         title=title,
+        source=req.source,
+        external_event_id=req.external_event_id,
+        scheduled_start_at=req.scheduled_start_at,
+        scheduled_end_at=req.scheduled_end_at,
+        organizer=req.organizer,
     )
 
     try:
@@ -72,7 +102,19 @@ async def _enqueue_bot_meeting(
             artifact_kind="audio",
         )
     )
-    create_task(session_id, status="queued")
+    create_task(session_id, status="queued", metadata={
+        "bot_id": bot.bot_id,
+        "global_bot_id": get_global_bot_id(bot.bot_id),
+        "node_id": get_node_id(),
+        "queue_message_id": result.message_id,
+        "meeting_url": req.meeting_url,
+        "title": title,
+        "source": req.source,
+        "external_event_id": req.external_event_id,
+        "scheduled_start_at": req.scheduled_start_at,
+        "scheduled_end_at": req.scheduled_end_at,
+        "organizer": req.organizer,
+    })
 
     return TaskResponse(
         task_id=session_id,
@@ -85,6 +127,7 @@ async def _enqueue_bot_meeting(
 @bots_router.post("/meetings", response_model=TaskResponse)
 async def create_meeting_for_any_idle_bot(
     req: BotMeetingRequest,
+    _auth=Depends(require_node_api_token),
     bot_selector=Depends(get_bot_selector),
     queue_publisher=Depends(get_queue_publisher),
     metadata_store=Depends(get_metadata_store),
@@ -109,6 +152,7 @@ async def create_meeting_for_any_idle_bot(
 async def create_meeting_for_bot(
     bot_id: str,
     req: BotMeetingRequest,
+    _auth=Depends(require_node_api_token),
     bot_selector=Depends(get_bot_selector),
     queue_publisher=Depends(get_queue_publisher),
     metadata_store=Depends(get_metadata_store),

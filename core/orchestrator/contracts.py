@@ -29,6 +29,11 @@ class SchedulerQueueHandoff:
     bot_id: str
     meeting_url: str
     title: str | None = None
+    source: str | None = None
+    external_event_id: str | None = None
+    scheduled_start_at: str | None = None
+    scheduled_end_at: str | None = None
+    organizer: str | None = None
 
 @dataclass(frozen=True)
 class SessionArtifactMetadata:

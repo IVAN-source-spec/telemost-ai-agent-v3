@@ -15,6 +15,11 @@ async def process_task(task_data):
     bot_id = task_data.bot_id
     meeting_url = task_data.meeting_url
     title = getattr(task_data, "title", None)
+    source = getattr(task_data, "source", None)
+    external_event_id = getattr(task_data, "external_event_id", None)
+    scheduled_start_at = getattr(task_data, "scheduled_start_at", None)
+    scheduled_end_at = getattr(task_data, "scheduled_end_at", None)
+    organizer = getattr(task_data, "organizer", None)
     print(f"[Worker] Processing task: {session_id} ({bot_id}) -> {meeting_url}")
 
     update_task_status(session_id, "running")
@@ -32,6 +37,11 @@ async def process_task(task_data):
             "reconnect_interval_sec": 10,
             "session_id": session_id,
             "title": title,
+            "source": source,
+            "external_event_id": external_event_id,
+            "scheduled_start_at": scheduled_start_at,
+            "scheduled_end_at": scheduled_end_at,
+            "organizer": organizer,
         }
         await bot.run(meeting_url, config)
 
@@ -42,6 +52,11 @@ async def process_task(task_data):
             "meeting_duration_formatted": config.get("meeting_duration_formatted", "00:00:00"),
             "meeting_dir": config.get("meeting_dir"),
             "audio_path": config.get("audio_path"),
+            "source": source,
+            "external_event_id": external_event_id,
+            "scheduled_start_at": scheduled_start_at,
+            "scheduled_end_at": scheduled_end_at,
+            "organizer": organizer,
         }
 
         audio_file = Path(config["audio_path"]) if config.get("audio_path") else None
