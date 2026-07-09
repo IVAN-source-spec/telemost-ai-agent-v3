@@ -1,0 +1,22 @@
+services:
+  telemost-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telemost-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PULSE_SERVER: unix:/run/user/1001/pulse/native
+      TELEMOST_AUTH_STATE_PATH: data/auth/yandex-session.json
+      TELEMOST_AUTH_COOKIES_PATH: data/auth/cookies.json
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data/auth:/app/data/auth:ro
+      - ./recordings:/app/recordings
+      - ./yandex_disk_upload_errors.jsonl:/app/yandex_disk_upload_errors.jsonl
+      - /run/user/1001/pulse/native:/run/user/1001/pulse/native
+      - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
+    shm_size: "2gb"

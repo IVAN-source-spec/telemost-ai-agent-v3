@@ -32,9 +32,16 @@ async def process_task(task_data):
         )
         bot = TelemostBot(headless=bot_headless, bot_id=bot_id)
         config = {
-            "alone_leave_threshold": 90,
-            "max_reconnect_attempts": 3,
-            "reconnect_interval_sec": 10,
+            "alone_leave_threshold": int(os.getenv("TELEMOST_ALONE_LEAVE_THRESHOLD_SECONDS", "20")),
+            "reconnect_enabled": os.getenv("TELEMOST_RECONNECT_ENABLED", "1").lower() in (
+                "1",
+                "true",
+                "yes",
+            ),
+            "max_reconnect_attempts": int(os.getenv("TELEMOST_RECONNECT_MAX_ATTEMPTS", "5")),
+            "reconnect_interval_sec": int(os.getenv("TELEMOST_RECONNECT_DELAY_SECONDS", "10")),
+            "reconnect_total_limit_seconds": int(os.getenv("TELEMOST_RECONNECT_TOTAL_LIMIT_SECONDS", "300")),
+            "reconnect_lost_checks": int(os.getenv("TELEMOST_RECONNECT_LOST_CHECKS", "2")),
             "session_id": session_id,
             "title": title,
             "source": source,
@@ -57,6 +64,7 @@ async def process_task(task_data):
             "scheduled_start_at": scheduled_start_at,
             "scheduled_end_at": scheduled_end_at,
             "organizer": organizer,
+            "reconnects": config.get("reconnects", []),
         }
 
         audio_file = Path(config["audio_path"]) if config.get("audio_path") else None

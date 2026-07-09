@@ -3,6 +3,7 @@ import os
 import shutil
 import http.client
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,6 +25,8 @@ class YandexDiskConfig:
     base_path: str
     delete_local_after_upload: bool
     errors_file: Path
+    upload_max_attempts: int
+    upload_retry_delay_seconds: int
 
     @classmethod
     def from_env(cls, root_dir: Path) -> "YandexDiskConfig":
@@ -43,12 +46,16 @@ class YandexDiskConfig:
             "YANDEX_DISK_UPLOAD_ERRORS_FILE",
             "yandex_disk_upload_errors.jsonl",
         )
+        upload_max_attempts = int(os.getenv("YANDEX_DISK_UPLOAD_MAX_ATTEMPTS", "3"))
+        upload_retry_delay_seconds = int(os.getenv("YANDEX_DISK_UPLOAD_RETRY_DELAY_SECONDS", "20"))
         return cls(
             enabled=enabled,
             token=token,
             base_path=base_path,
             delete_local_after_upload=delete_local,
             errors_file=errors_file,
+            upload_max_attempts=max(1, upload_max_attempts),
+            upload_retry_delay_seconds=max(0, upload_retry_delay_seconds),
         )
 
 
@@ -102,6 +109,28 @@ class YandexDiskClient:
 
     def _resource_url(self, path: str) -> str:
         return f"{API_BASE}?{urllib.parse.urlencode({'path': self._api_path(path)})}"
+
+    def delete_resource(self, remote_path: str, permanently: bool = True) -> None:
+        url = (
+            f"{API_BASE}?"
+            f"{urllib.parse.urlencode({'path': self._api_path(remote_path), 'permanently': str(permanently).lower()})}"
+        )
+        try:
+            self._request("DELETE", url)
+        except YandexDiskUploadError as error:
+            if "HTTP 404" not in str(error):
+                raise
+
+    def move_resource(self, source_path: str, target_path: str, overwrite: bool = True) -> None:
+        url = (
+            f"{API_BASE}/move?"
+            f"{urllib.parse.urlencode({
+                'from': self._api_path(source_path),
+                'path': self._api_path(target_path),
+                'overwrite': str(overwrite).lower(),
+            })}"
+        )
+        self._request("POST", url)
 
     def get_resource(self, remote_path: str, limit: int = 1000) -> dict | None:
         url = (
@@ -191,6 +220,30 @@ class YandexDiskClient:
             self.upload_file(local_path, remote_path)
             uploaded += 1
         return uploaded
+
+    def upload_folder_atomically(self, local_dir: Path, remote_dir: str) -> int:
+        normalized_remote_dir = self._normalize_remote_path(remote_dir)
+        upload_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        temp_dir = (
+            self._normalize_remote_path(str(Path(normalized_remote_dir).parent).replace("\\", "/"))
+            + "/.uploading/"
+            + Path(normalized_remote_dir).name
+            + f"__{upload_id}"
+        )
+
+        try:
+            self.delete_resource(temp_dir)
+            uploaded = self.upload_folder(local_dir, temp_dir)
+            if uploaded <= 0:
+                raise YandexDiskUploadError(f"No files uploaded from {local_dir}")
+            self.move_resource(temp_dir, normalized_remote_dir, overwrite=True)
+            return uploaded
+        except Exception:
+            try:
+                self.delete_resource(temp_dir)
+            except Exception:
+                pass
+            raise
 
 
 class YandexDiskUploader:
@@ -305,8 +358,43 @@ class YandexDiskUploader:
         with self.config.errors_file.open("a", encoding="utf-8") as file_obj:
             file_obj.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    @staticmethod
+    def is_meeting_folder_complete(meeting_dir: Path) -> bool:
+        if not meeting_dir.exists() or not meeting_dir.is_dir():
+            return False
+
+        status_path = meeting_dir / "transcription_status.json"
+        if not status_path.exists():
+            return False
+        try:
+            status_data = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+
+        if status_data.get("status") != "completed":
+            return False
+
+        required_files = [
+            meeting_dir / "meeting_time.json",
+            meeting_dir / "recording_meeting.wav",
+            status_path,
+        ]
+        if any(not path.exists() or not path.is_file() or path.stat().st_size <= 0 for path in required_files):
+            return False
+
+        pyannote_json = [
+            path
+            for path in meeting_dir.glob("recording_meeting_pyannote_*.json")
+            if not path.name.endswith("_summary.json")
+        ]
+        pyannote_txt = list(meeting_dir.glob("recording_meeting_pyannote_*.txt"))
+        return bool(pyannote_json and pyannote_txt)
+
     def finalize_meeting_folder(self, meeting_dir: Path) -> bool:
         if not self.config.enabled:
+            return False
+        if not self.is_meeting_folder_complete(meeting_dir):
+            print(f"[YandexDisk] Meeting folder is not complete yet, upload skipped: {meeting_dir}")
             return False
         if not self.config.token:
             remote_dir = self._remote_meeting_dir(meeting_dir)
@@ -318,9 +406,23 @@ class YandexDiskUploader:
             client = YandexDiskClient(self.config.token)
             meeting_dir = self._renumber_local_meeting_dir_if_needed(meeting_dir, client)
             remote_dir = self._remote_meeting_dir(meeting_dir)
-            uploaded_files = client.upload_folder(meeting_dir, remote_dir)
+            uploaded_files = 0
+            last_error = None
+            for attempt in range(1, self.config.upload_max_attempts + 1):
+                try:
+                    uploaded_files = client.upload_folder_atomically(meeting_dir, remote_dir)
+                    break
+                except Exception as error:
+                    last_error = error
+                    if attempt >= self.config.upload_max_attempts:
+                        raise
+                    print(
+                        "[YandexDisk] Upload attempt failed, retrying: "
+                        f"{meeting_dir} attempt {attempt}/{self.config.upload_max_attempts}: {error}"
+                    )
+                    time.sleep(self.config.upload_retry_delay_seconds)
             if uploaded_files <= 0:
-                raise YandexDiskUploadError(f"No files uploaded from {meeting_dir}")
+                raise YandexDiskUploadError(f"No files uploaded from {meeting_dir}: {last_error}")
             if self.config.delete_local_after_upload:
                 shutil.rmtree(meeting_dir)
             print(

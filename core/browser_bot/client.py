@@ -6,7 +6,6 @@ from urllib.parse import urlparse
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 from core.meeting_runtime.participant_policy import should_leave
-from core.browser_bot.connection_monitor import plan_reconnect
 from core.recording.audio_recorder import AudioRecorder
 from pathlib import Path
 from datetime import datetime, timezone
@@ -42,6 +41,7 @@ class TelemostBot:
         self.meeting_started_at = None
         self.meeting_ended_at = None
         self.meeting_duration_seconds = 0
+        self.reconnect_events = []
         self.auth_ok = False
         self._last_valid_participant_count = 0
         self.auth_state_path = Path(
@@ -252,48 +252,57 @@ class TelemostBot:
     async def join(self, meeting_url: str, session_id: str = None):
         self.session_id = session_id
 
-        self._playwright = await async_playwright().start()
+        if self._playwright is None:
+            self._playwright = await async_playwright().start()
+        if self.browser is not None and not self.browser.is_connected():
+            self.browser = None
+            self.context = None
+            self.page = None
         context_options = {
             "permissions": ["camera", "microphone"],
             "user_agent": USER_AGENT,
             "viewport": VIEWPORT,
         }
 
-        if self.profile_dir is not None:
+        if self.profile_dir is not None and self.browser is None:
             self._print(
                 "[Bot] TELEMOST_BROWSER_PROFILE_DIR is ignored: "
                 "AIProjects-style auth uses storage_state, not a persistent profile"
             )
 
-        self.browser = await self._playwright.chromium.launch(
-            headless=self.headless,
-            args=CHROMIUM_ARGS,
-        )
+        if self.browser is None:
+            self.browser = await self._playwright.chromium.launch(
+                headless=self.headless,
+                args=CHROMIUM_ARGS,
+            )
 
-        storage_state_path = None if self.join_as_guest else self._resolve_storage_state_path()
-        if self.join_as_guest:
-            self.auth_ok = False
-            self._print("[Bot] AIProjects guest mode enabled: Yandex storage_state is not loaded for meeting join")
-        elif storage_state_path is not None:
-            context_options["storage_state"] = str(storage_state_path)
-            self.auth_ok = True
-            self._print(f"[Bot] Loaded AIProjects-style storage_state: {storage_state_path}")
-        else:
-            self.auth_ok = False
-            self._print(f"[Bot] Storage state not found: {self.auth_state_path}")
+        if self.context is None:
+            storage_state_path = None if self.join_as_guest else self._resolve_storage_state_path()
+            if self.join_as_guest:
+                self.auth_ok = False
+                self._print("[Bot] AIProjects guest mode enabled: Yandex storage_state is not loaded for meeting join")
+            elif storage_state_path is not None:
+                context_options["storage_state"] = str(storage_state_path)
+                self.auth_ok = True
+                self._print(f"[Bot] Loaded AIProjects-style storage_state: {storage_state_path}")
+            else:
+                self.auth_ok = False
+                self._print(f"[Bot] Storage state not found: {self.auth_state_path}")
 
-        self.context = await self.browser.new_context(**context_options)
+            self.context = await self.browser.new_context(**context_options)
 
-        if not self.join_as_guest and not self.auth_ok:
-            self.auth_ok = await self._load_yandex_cookies()
+            if not self.join_as_guest and not self.auth_ok:
+                self.auth_ok = await self._load_yandex_cookies()
 
-        if not self.join_as_guest and not self.auth_ok:
-            message = "Authorized Yandex session unavailable"
-            if self.require_auth:
-                raise RuntimeError(message)
-            self._print(f"[Bot] {message}; using guest mode")
-        await self._install_timer_camera()
-        self.page = await self.context.new_page()
+            if not self.join_as_guest and not self.auth_ok:
+                message = "Authorized Yandex session unavailable"
+                if self.require_auth:
+                    raise RuntimeError(message)
+                self._print(f"[Bot] {message}; using guest mode")
+            await self._install_timer_camera()
+
+        if self.page is None or self.page.is_closed():
+            self.page = await self.context.new_page()
         parsed_meeting_url = urlparse(meeting_url)
         meeting_origin = f"{parsed_meeting_url.scheme}://{parsed_meeting_url.netloc}"
         await self.context.grant_permissions(["camera", "microphone"], origin=meeting_origin)
@@ -462,6 +471,7 @@ class TelemostBot:
             "ended_at": self.meeting_ended_at.isoformat() if self.meeting_ended_at else None,
             "duration_seconds": self.meeting_duration_seconds,
             "duration_formatted": self._format_duration(self.meeting_duration_seconds),
+            "reconnects": self.reconnect_events,
         }
         path = self._meeting_artifacts().meeting_time_path
         path.write_text(
@@ -573,6 +583,93 @@ class TelemostBot:
             self._print(f"[Bot] Could not get participant count: {e}")
             return self._last_valid_participant_count
 
+    async def _is_in_meeting_room(self) -> bool:
+        if self.page is None or self.page.is_closed():
+            return False
+        try:
+            return bool(await self.page.evaluate('''() => {
+                const visible = (node) => {
+                    if (!node) return false;
+                    const style = window.getComputedStyle(node);
+                    const rect = node.getBoundingClientRect();
+                    return style.visibility !== 'hidden' &&
+                        style.display !== 'none' &&
+                        rect.width > 0 &&
+                        rect.height > 0;
+                };
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const hasPreJoinButton = buttons.some((button) => {
+                    if (!visible(button)) return false;
+                    const text = (button.innerText || button.textContent || '').trim();
+                    return text.includes('Продолжить в браузере') ||
+                        text.includes('Подключиться') ||
+                        text.includes('Присоединиться') ||
+                        text.includes('Войти');
+                });
+                if (hasPreJoinButton) return false;
+
+                const bodyText = document.body ? document.body.innerText : '';
+                const looksDisconnected =
+                    bodyText.includes('Соединение потеряно') ||
+                    bodyText.includes('Переподключение') ||
+                    bodyText.includes('Повторить') ||
+                    bodyText.includes('Connection lost') ||
+                    bodyText.includes('Reconnecting');
+                if (looksDisconnected) return false;
+
+                return !!document.querySelector('[data-testid="participant-item"]') ||
+                    !!document.querySelector('[data-testid="mute-audio"]') ||
+                    !!document.querySelector('[data-testid="leave-call"]') ||
+                    !!document.querySelector('video') ||
+                    !!document.querySelector('[class*="participant"]');
+            }'''))
+        except Exception as e:
+            self._print(f"[Bot] Meeting room state check failed: {e}")
+            return False
+
+    async def _try_reconnect(self, meeting_url: str, session_id: str, config: dict, attempt: int) -> bool:
+        detected_at = datetime.now(timezone.utc)
+        max_attempts = int(config.get("max_reconnect_attempts", 3))
+        delay_seconds = int(config.get("reconnect_interval_sec", 10))
+        total_limit_seconds = int(config.get("reconnect_total_limit_seconds", 300))
+        deadline = asyncio.get_running_loop().time() + total_limit_seconds
+
+        while attempt <= max_attempts and asyncio.get_running_loop().time() <= deadline:
+            event = {
+                "detected_at": detected_at.isoformat(),
+                "attempt": attempt,
+                "status": "started",
+            }
+            self.reconnect_events.append(event)
+            self._write_meeting_time()
+            self._print(f"[Bot] Reconnect attempt {attempt}/{max_attempts}")
+
+            try:
+                if self.page is not None and not self.page.is_closed():
+                    await self.page.close()
+                self.page = None
+                await asyncio.sleep(delay_seconds)
+                await self.join(meeting_url, session_id)
+                if await self._is_in_meeting_room():
+                    reconnected_at = datetime.now(timezone.utc)
+                    event["status"] = "success"
+                    event["reconnected_at"] = reconnected_at.isoformat()
+                    event["downtime_seconds"] = int((reconnected_at - detected_at).total_seconds())
+                    self._write_meeting_time()
+                    self._print("[Bot] Reconnected to meeting")
+                    return True
+                event["status"] = "failed"
+                event["error"] = "meeting room was not detected after reconnect"
+            except Exception as e:
+                event["status"] = "failed"
+                event["error"] = str(e)
+                self._print(f"[Bot] Reconnect attempt failed: {e}")
+            self._write_meeting_time()
+            attempt += 1
+
+        self._print("[Bot] Reconnect attempts exhausted")
+        return False
+
     async def leave(self):
         """Закрывает браузер и завершает запись."""
         self._finish_meeting_timer()
@@ -596,9 +693,29 @@ class TelemostBot:
 
         alone_seconds = 0
         attempt = 0
+        lost_checks = 0
+        reconnect_enabled = config.get("reconnect_enabled", True)
         max_participants = 0  # начинаем с 0, так как бот считает других участников
 
         while True:
+            if reconnect_enabled:
+                in_meeting = await self._is_in_meeting_room()
+                lost_checks = 0 if in_meeting else lost_checks + 1
+                if lost_checks >= int(config.get("reconnect_lost_checks", 2)):
+                    self._print("[Bot] Meeting connection appears lost")
+                    reconnected = await self._try_reconnect(
+                        meeting_url,
+                        session_id,
+                        config,
+                        attempt + 1,
+                    )
+                    if not reconnected:
+                        self._print("[Bot] Leaving because reconnect failed")
+                        break
+                    attempt += 1
+                    lost_checks = 0
+                    continue
+
             participants = await self.get_participant_count()
             self._print(f"[Bot] Participants: {participants}")
 
@@ -615,22 +732,6 @@ class TelemostBot:
             else:
                 alone_seconds = 0
 
-            if self.page.is_closed():
-                decision = plan_reconnect(
-                    previous_participants=participants,
-                    attempt=attempt,
-                    max_attempts=config.get("max_reconnect_attempts", 3),
-                    interval_sec=config.get("reconnect_interval_sec", 10),
-                )
-                if decision["action"] == "reconnect":
-                    self._print(f"[Bot] Reconnecting after {decision['delay_sec']}s")
-                    await asyncio.sleep(decision["delay_sec"])
-                    await self.join(meeting_url, session_id)
-                    attempt += 1
-                    continue
-                else:
-                    self._print(f"[Bot] Giving up: {decision['reason']}")
-                    break
             await asyncio.sleep(5)
 
         # Сохраняем максимальное количество участников в конфиг для транскрипции
@@ -646,6 +747,7 @@ class TelemostBot:
         config["meeting_duration_formatted"] = self._format_duration(
             self.meeting_duration_seconds
         )
+        config["reconnects"] = self.reconnect_events
         if self.meeting_artifacts:
             config["meeting_dir"] = str(self.meeting_artifacts.meeting_dir)
             config["audio_path"] = str(self.meeting_artifacts.audio_path)

@@ -34,6 +34,16 @@ def find_audio_files(recordings_dir: Path) -> list[Path]:
     return get_meeting_storage(recordings_dir.parent).find_recording_audio_files()
 
 
+def find_completed_meeting_dirs(recordings_dir: Path) -> list[Path]:
+    meeting_dirs = []
+    for audio_path in find_audio_files(recordings_dir):
+        meeting_dir = audio_path.parent
+        status_data = read_status(meeting_dir / "transcription_status.json")
+        if status_data and status_data.get("status") == "completed":
+            meeting_dirs.append(meeting_dir)
+    return sorted(set(meeting_dirs))
+
+
 async def finalize_meeting_folder(meeting_dir: Path) -> None:
     uploaded = await asyncio.to_thread(storage.finalize_meeting_folder, meeting_dir)
     if uploaded:
@@ -165,15 +175,33 @@ async def monitor_loop() -> None:
 
     interval_seconds = int(os.getenv("TRANSCRIPTION_MONITOR_INTERVAL_SECONDS", "10"))
     max_parallel = int(os.getenv("TRANSCRIPTION_MONITOR_MAX_PARALLEL", "3"))
+    retry_failed_uploads = os.getenv("YANDEX_DISK_RETRY_FAILED_UPLOADS_ENABLED", "1").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    retry_upload_interval_seconds = int(os.getenv("YANDEX_DISK_RETRY_FAILED_UPLOADS_INTERVAL_SECONDS", "300"))
     semaphore = asyncio.Semaphore(max_parallel)
     running: dict[str, asyncio.Task] = {}
+    running_upload_retries: dict[str, asyncio.Task] = {}
+    next_upload_retry_at = 0.0
 
     print(f"[TranscriptionMonitor] Monitoring {recordings_dir}")
     print(f"[TranscriptionMonitor] Max parallel submissions: {max_parallel}")
+    if retry_failed_uploads:
+        print(
+            "[TranscriptionMonitor] Yandex Disk retry for completed local meetings enabled: "
+            f"every {retry_upload_interval_seconds}s"
+        )
 
     async def run_limited(meeting_dir: Path, status_data: dict) -> None:
         async with semaphore:
             await submit_transcription(meeting_dir, status_data, api_key)
+
+    async def run_upload_retry_limited(meeting_dir: Path) -> None:
+        async with semaphore:
+            print(f"[TranscriptionMonitor] Retrying Yandex Disk upload: {meeting_dir}")
+            await finalize_meeting_folder(meeting_dir)
 
     while True:
         for key, task in list(running.items()):
@@ -183,6 +211,14 @@ async def monitor_loop() -> None:
                     task.result()
                 except Exception as error:
                     print(f"[TranscriptionMonitor] Background task failed: {error}")
+
+        for key, task in list(running_upload_retries.items()):
+            if task.done():
+                running_upload_retries.pop(key, None)
+                try:
+                    task.result()
+                except Exception as error:
+                    print(f"[TranscriptionMonitor] Background upload retry failed: {error}")
 
         for audio_path in find_audio_files(recordings_dir):
             meeting_dir = audio_path.parent
@@ -194,6 +230,15 @@ async def monitor_loop() -> None:
                 running[key] = asyncio.create_task(run_limited(meeting_dir, status_data))
             elif status in {"pending", "processing"} and key not in running:
                 await refresh_pending_status(meeting_dir, status_data, api_key)
+
+        loop_time = asyncio.get_running_loop().time()
+        if retry_failed_uploads and loop_time >= next_upload_retry_at:
+            next_upload_retry_at = loop_time + max(30, retry_upload_interval_seconds)
+            for meeting_dir in find_completed_meeting_dirs(recordings_dir):
+                key = str(meeting_dir)
+                if key in running or key in running_upload_retries:
+                    continue
+                running_upload_retries[key] = asyncio.create_task(run_upload_retry_limited(meeting_dir))
 
         await asyncio.sleep(interval_seconds)
 
