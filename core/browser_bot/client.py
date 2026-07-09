@@ -43,6 +43,7 @@ class TelemostBot:
         self.meeting_ended_at = None
         self.meeting_duration_seconds = 0
         self.auth_ok = False
+        self._last_valid_participant_count = 0
         self.auth_state_path = Path(
             auth_state_path
             or os.getenv("TELEMOST_AUTH_STATE_PATH", DEFAULT_STORAGE_STATE_PATH)
@@ -545,12 +546,32 @@ class TelemostBot:
                 return Math.max(0, count);
             }''')
 
-            print(f"[Bot] Other participants count: {result}")
-            return result
+            raw_count = int(result)
+            max_expected = int(os.getenv("TELEMOST_MAX_EXPECTED_PARTICIPANTS", "15"))
+            spike_delta = int(os.getenv("TELEMOST_PARTICIPANT_SPIKE_DELTA", "10"))
+            previous = self._last_valid_participant_count
+
+            if raw_count > max_expected:
+                self._print(
+                    "[Bot] Ignoring participant count above limit: "
+                    f"{raw_count} > {max_expected}; using previous valid count {previous}"
+                )
+                return previous
+
+            if previous > 0 and raw_count > previous and (raw_count - previous) > spike_delta:
+                self._print(
+                    "[Bot] Ignoring participant count spike: "
+                    f"{previous} -> {raw_count}; using previous valid count {previous}"
+                )
+                return previous
+
+            self._last_valid_participant_count = raw_count
+            self._print(f"[Bot] Other participants count: {raw_count}")
+            return raw_count
 
         except Exception as e:
-            print(f"[Bot] Could not get participant count: {e}")
-            return 0
+            self._print(f"[Bot] Could not get participant count: {e}")
+            return self._last_valid_participant_count
 
     async def leave(self):
         """Закрывает браузер и завершает запись."""
@@ -628,4 +649,3 @@ class TelemostBot:
         if self.meeting_artifacts:
             config["meeting_dir"] = str(self.meeting_artifacts.meeting_dir)
             config["audio_path"] = str(self.meeting_artifacts.audio_path)
-

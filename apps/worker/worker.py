@@ -32,7 +32,7 @@ async def process_task(task_data):
         )
         bot = TelemostBot(headless=bot_headless, bot_id=bot_id)
         config = {
-            "alone_leave_threshold": 20,
+            "alone_leave_threshold": 90,
             "max_reconnect_attempts": 3,
             "reconnect_interval_sec": 10,
             "session_id": session_id,
