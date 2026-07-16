@@ -30,17 +30,46 @@ def write_status(status_file: Path, data: dict) -> None:
     status_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _is_confidential_dir(path: Path) -> bool:
+    return path.name in {
+        "\u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u0430\u044f \u0447\u0430\u0441\u0442\u044c",
+        "confidential_part",
+    }
+
+
+def _meeting_dir_for_audio(audio_path: Path) -> Path:
+    audio_dir = audio_path.parent
+    if _is_confidential_dir(audio_dir):
+        return audio_dir.parent
+    return audio_dir
+
+
+def _confidential_recording_is_completed(audio_path: Path) -> bool:
+    audio_dir = audio_path.parent
+    if not _is_confidential_dir(audio_dir):
+        return True
+    status_data = read_status(audio_dir / "confidential_recording_status.json")
+    return bool(status_data and status_data.get("status") == "completed")
+
+
 def find_audio_files(recordings_dir: Path) -> list[Path]:
-    return get_meeting_storage(recordings_dir.parent).find_recording_audio_files()
+    audio_files = get_meeting_storage(recordings_dir.parent).find_recording_audio_files()
+    confidential_audio_files = sorted(
+        path
+        for path in recordings_dir.glob("*/*/*/*/*/recording_meeting.wav")
+        if path.is_file() and _is_confidential_dir(path.parent)
+    )
+    return sorted(set(audio_files + confidential_audio_files))
 
 
 def find_completed_meeting_dirs(recordings_dir: Path) -> list[Path]:
     meeting_dirs = []
     for audio_path in find_audio_files(recordings_dir):
-        meeting_dir = audio_path.parent
-        status_data = read_status(meeting_dir / "transcription_status.json")
+        if not _confidential_recording_is_completed(audio_path):
+            continue
+        status_data = read_status(audio_path.parent / "transcription_status.json")
         if status_data and status_data.get("status") == "completed":
-            meeting_dirs.append(meeting_dir)
+            meeting_dirs.append(_meeting_dir_for_audio(audio_path))
     return sorted(set(meeting_dirs))
 
 
@@ -50,13 +79,21 @@ async def finalize_meeting_folder(meeting_dir: Path) -> None:
         print(f"[TranscriptionMonitor] Meeting folder finalized: {meeting_dir}")
 
 
+def _target_speakers_for_audio(audio_path: Path) -> int:
+    if _is_confidential_dir(audio_path.parent):
+        meeting_time = read_status(audio_path.parent / "meeting_time.json") or {}
+        target_speakers = int(meeting_time.get("max_participants") or 0)
+        return max(1, target_speakers)
+    return int(os.getenv("TRANSCRIPTION_DEFAULT_SPEAKERS", "1"))
+
+
 def ensure_status_for_audio(audio_path: Path) -> dict:
     status_file = audio_path.parent / "transcription_status.json"
     data = read_status(status_file)
     if data is not None:
         return data
 
-    target_speakers = int(os.getenv("TRANSCRIPTION_DEFAULT_SPEAKERS", "1"))
+    target_speakers = _target_speakers_for_audio(audio_path)
     data = {
         "audio_path": str(audio_path),
         "job_id": None,
@@ -126,7 +163,7 @@ async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: st
         data["error"] = None
         write_status(status_file, data)
         print(f"[TranscriptionMonitor] Completed {meeting_dir.name}, job_id={job_id}")
-        await finalize_meeting_folder(meeting_dir)
+        await finalize_meeting_folder(_meeting_dir_for_audio(audio_path))
     except Exception as error:
         data = read_status(status_file) or status_data
         data["status"] = "failed"
@@ -154,7 +191,7 @@ async def refresh_pending_status(meeting_dir: Path, status_data: dict, api_key: 
         data["error"] = None
         write_status(status_file, data)
         print(f"[TranscriptionMonitor] Status updated for {meeting_dir.name}")
-        await finalize_meeting_folder(meeting_dir)
+        await finalize_meeting_folder(_meeting_dir_for_audio(audio_path))
     elif job_status in {"failed", "error"}:
         data = read_status(status_file) or status_data
         data["status"] = "failed"
@@ -201,7 +238,7 @@ async def monitor_loop() -> None:
     async def run_upload_retry_limited(meeting_dir: Path) -> None:
         async with semaphore:
             print(f"[TranscriptionMonitor] Retrying Yandex Disk upload: {meeting_dir}")
-            await finalize_meeting_folder(meeting_dir)
+            await finalize_meeting_folder(_meeting_dir_for_audio(audio_path))
 
     while True:
         for key, task in list(running.items()):
@@ -221,6 +258,8 @@ async def monitor_loop() -> None:
                     print(f"[TranscriptionMonitor] Background upload retry failed: {error}")
 
         for audio_path in find_audio_files(recordings_dir):
+            if not _confidential_recording_is_completed(audio_path):
+                continue
             meeting_dir = audio_path.parent
             status_data = ensure_status_for_audio(audio_path)
             status = status_data.get("status")

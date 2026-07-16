@@ -1,0 +1,989 @@
+import asyncio
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+class ChatCommandsModule:
+    CONFIDENTIAL_PREFIXES = (
+        "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f",
+        "#\u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f",
+    )
+
+    def __init__(self, page, logger=print, bot_id: str | None = None, confidential_event_handler=None):
+        self.page = page
+        self.logger = logger
+        self.bot_id = bot_id or "unknown"
+        self.confidential_event_handler = confidential_event_handler
+        self._seen_message_keys: set[str] = set()
+        self._handled_command_keys: set[str] = set()
+        self._monitor_task: asyncio.Task | None = None
+        self._bot_sent_texts: set[str] = set()
+
+    async def run_probe(self) -> Path:
+        self.logger("[Bot] Chat commands module enabled")
+        self._messages_path().touch(exist_ok=True)
+
+        click_result = await self._click_chat_button()
+        self.logger(f"[Bot] Chat button result: {click_result}")
+
+        await self._send_startup_message()
+        self._start_message_monitor()
+        return self._messages_path()
+
+    async def _click_chat_button(self) -> str:
+        result = await self.page.evaluate("""() => {
+            const blacklist = ['demonstrac', 'screen', 'share', 'presentation'];
+
+            const isVisibleAndEnabled = (element) => {
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    !element.disabled;
+            };
+
+            const getLabels = (element) => {
+                const text = (element.innerText || element.textContent || '').trim();
+                const ariaLabel = (element.getAttribute('aria-label') || '').trim();
+                const title = (element.getAttribute('title') || '').trim();
+                const testId = (element.getAttribute('data-testid') || '').trim();
+                const combined = `${text} ${ariaLabel} ${title} ${testId}`.toLowerCase();
+                return { text, ariaLabel, title, testId, combined };
+            };
+
+            const isChatControl = (element) => {
+                const { text, ariaLabel, title, combined } = getLabels(element);
+                if (blacklist.some((word) => combined.includes(word))) {
+                    return false;
+                }
+                return (
+                    text.toLowerCase() === '\u0447\u0430\u0442' ||
+                    ariaLabel.toLowerCase() === '\u0447\u0430\u0442' ||
+                    ariaLabel.toLowerCase() === '\u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0447\u0430\u0442' ||
+                    title.toLowerCase() === '\u0447\u0430\u0442' ||
+                    title.toLowerCase() === '\u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0447\u0430\u0442'
+                );
+            };
+
+            const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+            const chatButton = buttons.find((button) => isVisibleAndEnabled(button) && isChatControl(button));
+            if (!chatButton) {
+                return 'chat button not found';
+            }
+
+            const { text, ariaLabel, title, testId } = getLabels(chatButton);
+            chatButton.click();
+            return `clicked via exact text: ${ariaLabel || title || testId || text || 'unknown'}`;
+        }""")
+        return result
+
+    async def _send_startup_message(self) -> None:
+        message = self._startup_message_text()
+        if not message:
+            return
+
+        try:
+            send_result = await self._send_service_message(message)
+            self.logger(f"[Bot] Chat startup message result: {send_result}")
+        except Exception as error:
+            self.logger(f"[Bot] Chat startup message failed: {error}")
+
+    def _startup_message_text(self) -> str:
+        default_message = (
+            "\u0411\u043e\u0442 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d \u0438 \u0433\u043e\u0442\u043e\u0432 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u044b. "
+            "\u0414\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b: "
+            "#help - \u0441\u043f\u0440\u0430\u0432\u043a\u0430; "
+            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f "
+            "\u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043a\u043e\u043d\u0444. \u0440\u0435\u0436\u0438\u043c"
+        )
+        return os.getenv("TELEMOST_CHAT_COMMANDS_STARTUP_MESSAGE", default_message).strip()
+
+    async def _send_service_message(self, message: str) -> str:
+        result = await self._send_message_to_chat(message)
+        self._bot_sent_texts.add(self._normalize_message_text(message))
+        return result
+
+    async def _send_message_to_chat(self, message: str) -> str:
+        chat_frame = await self._wait_for_chat_frame(timeout_ms=10000)
+        if chat_frame is None:
+            return "chat iframe not found"
+
+        editor = await self._wait_for_message_editor(chat_frame)
+        if editor is None:
+            await self._write_chat_send_debug(chat_frame, "message editor not found")
+            return "message editor not found"
+
+        await editor.click(timeout=5000)
+        try:
+            await editor.fill(message, timeout=5000)
+        except Exception:
+            await editor.press("Control+A", timeout=3000)
+            await editor.type(message, delay=5, timeout=10000)
+
+        await self.page.wait_for_timeout(300)
+        await editor.press("Enter", timeout=5000)
+        await self.page.wait_for_timeout(500)
+        if await self._editor_text_was_sent(editor, message):
+            return "sent via enter"
+
+        send_result = await self._click_send_button_in_frame(chat_frame)
+        await self._save_send_attempt_screenshot()
+        if send_result != "send button not found":
+            return send_result
+
+        return "send action attempted, message may still be in editor"
+
+
+    async def _save_send_attempt_screenshot(self) -> None:
+        try:
+            screenshot_path = self._screenshot_path("after_send_attempt")
+            await self.page.screenshot(path=str(screenshot_path), full_page=True)
+            self.logger(f"[Bot] Chat send attempt screenshot saved: {screenshot_path}")
+        except Exception as error:
+            self.logger(f"[Bot] Chat send attempt screenshot failed: {error}")
+
+    async def _editor_text_was_sent(self, editor, message: str) -> bool:
+        try:
+            current_text = await editor.evaluate(
+                """(element) => {
+                    const value = element.value ?? element.innerText ?? element.textContent ?? '';
+                    return String(value).replace(/\\s+/g, ' ').trim();
+                }"""
+            )
+        except Exception:
+            return False
+        return current_text != self._normalize_message_text(message)
+
+    async def _wait_for_message_editor(self, chat_frame):
+        timeout_ms = int(os.getenv("TELEMOST_CHAT_COMMANDS_EDITOR_TIMEOUT_MS", "60000"))
+        deadline = datetime.now(timezone.utc).timestamp() + timeout_ms / 1000
+        while datetime.now(timezone.utc).timestamp() < deadline:
+            editor = await self._find_message_editor(chat_frame)
+            if editor is not None:
+                return editor
+            await self.page.wait_for_timeout(500)
+        return None
+
+    async def _find_message_editor(self, chat_frame):
+        selectors = [
+            'textarea',
+            '[contenteditable="true"]',
+            '[role="textbox"]',
+            'input[type="text"]',
+        ]
+        for selector in selectors:
+            locator = chat_frame.locator(selector)
+            count = await locator.count()
+            for index in range(count - 1, -1, -1):
+                candidate = locator.nth(index)
+                try:
+                    if await candidate.is_visible(timeout=1000) and await candidate.is_enabled(timeout=1000):
+                        return candidate
+                except Exception:
+                    continue
+
+        return None
+
+    async def _click_send_button_in_frame(self, chat_frame) -> str:
+        result = await chat_frame.evaluate("""() => {
+            const isVisible = (element) => {
+                if (!element) {
+                    return false;
+                }
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    Number(style.opacity || '1') !== 0;
+            };
+            const clickElement = (element) => {
+                if (!element) {
+                    return null;
+                }
+                const clickable = element.closest('button, [role="button"], [data-testid], [class]') || element;
+                clickable.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+                clickable.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }));
+                clickable.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+                return clickable;
+            };
+
+            const points = [
+                [window.innerWidth - 28, window.innerHeight - 28],
+                [window.innerWidth - 30, window.innerHeight - 32],
+                [window.innerWidth - 36, window.innerHeight - 24],
+                [window.innerWidth - 24, window.innerHeight - 36],
+            ];
+            for (const [x, y] of points) {
+                const element = document.elementFromPoint(x, y);
+                const clicked = clickElement(element);
+                if (clicked) {
+                    const rect = clicked.getBoundingClientRect();
+                    const label = `${clicked.innerText || ''} ${clicked.textContent || ''} ${clicked.getAttribute?.('aria-label') || ''} ${clicked.getAttribute?.('title') || ''} ${clicked.getAttribute?.('data-testid') || ''} ${clicked.className || ''}`.replace(/\\s+/g, ' ').trim();
+                    return `sent via iframe elementFromPoint ${Math.round(x)},${Math.round(y)}: ${label} @ ${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.width)},${Math.round(rect.height)}`;
+                }
+            }
+
+            const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, span'))
+                .filter(isVisible)
+                .map((element) => {
+                    const rect = element.getBoundingClientRect();
+                    const label = `${element.innerText || ''} ${element.textContent || ''} ${element.getAttribute?.('aria-label') || ''} ${element.getAttribute?.('title') || ''} ${element.getAttribute?.('data-testid') || ''} ${element.className || ''}`.toLowerCase();
+                    return { element, rect, label };
+                })
+                .filter((item) => item.rect.y > window.innerHeight * 0.82)
+                .sort((left, right) => right.rect.x - left.rect.x);
+            const target = candidates[0]?.element;
+            const clicked = clickElement(target);
+            if (!clicked) {
+                return 'send button not found';
+            }
+            const rect = clicked.getBoundingClientRect();
+            return `sent via iframe bottom-right candidate @ ${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.width)},${Math.round(rect.height)}`;
+        }""")
+        return result
+
+    async def _write_chat_send_debug(self, chat_frame, reason: str) -> None:
+        try:
+            debug = await chat_frame.evaluate("""(reason) => {
+                const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                const visible = (element) => {
+                    const rect = element.getBoundingClientRect();
+                    const style = window.getComputedStyle(element);
+                    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+                };
+                return {
+                    strategy: 'chat-send-debug',
+                    reason,
+                    frameUrl: window.location.href,
+                    bodyTextSample: clean(document.body.innerText).slice(0, 1200),
+                    editors: Array.from(document.querySelectorAll('textarea, input[type="text"], [contenteditable="true"], [role="textbox"]'))
+                        .map((element) => {
+                            const rect = element.getBoundingClientRect();
+                            return {
+                                tag: element.tagName,
+                                role: element.getAttribute('role') || '',
+                                ariaLabel: element.getAttribute('aria-label') || '',
+                                placeholder: element.getAttribute('placeholder') || '',
+                                className: typeof element.className === 'string' ? element.className : '',
+                                visible: visible(element),
+                                x: Math.round(rect.x),
+                                y: Math.round(rect.y),
+                                width: Math.round(rect.width),
+                                height: Math.round(rect.height),
+                            };
+                        }),
+                };
+            }""", reason)
+            self._write_debug_snapshot(debug)
+        except Exception as error:
+            self.logger(f"[Bot] Chat send debug failed: {error}")
+
+    async def _wait_for_chat_frame(self, timeout_ms: int = 10000):
+        deadline = datetime.now(timezone.utc).timestamp() + timeout_ms / 1000
+        while datetime.now(timezone.utc).timestamp() < deadline:
+            frame = self._find_chat_frame()
+            if frame is not None:
+                return frame
+            await self.page.wait_for_timeout(250)
+        return None
+
+    def _start_message_monitor(self) -> None:
+        if self._monitor_task is not None and not self._monitor_task.done():
+            return
+        self._messages_path().touch(exist_ok=True)
+        self._monitor_task = asyncio.create_task(self._monitor_messages_loop())
+        self.logger(f"[Bot] Chat messages monitor started: {self._messages_path()}")
+
+    async def _monitor_messages_loop(self) -> None:
+        interval_ms = int(os.getenv("TELEMOST_CHAT_COMMANDS_MONITOR_INTERVAL_MS", "5000"))
+        try:
+            while True:
+                try:
+                    if self.page.is_closed():
+                        return
+                    messages = await self._read_visible_chat_messages()
+                    new_messages = self._append_new_messages(messages)
+                    await self._handle_new_messages(new_messages)
+                    self.logger(
+                        f"[Bot] Chat monitor scan: {len(messages)} visible candidate(s), {len(new_messages)} new"
+                    )
+                except Exception as error:
+                    self.logger(f"[Bot] Chat messages monitor error: {error}")
+                await self.page.wait_for_timeout(interval_ms)
+        finally:
+            self._cleanup_debug_artifacts()
+
+    async def _read_visible_chat_messages(self) -> list[dict]:
+        chat_frame = self._find_chat_frame()
+        if chat_frame is None:
+            self._write_debug_snapshot(
+                {
+                    "strategy": "chat-iframe-clean-messages",
+                    "reason": "chat iframe not found",
+                    "frames": [frame.url for frame in self.page.frames],
+                }
+            )
+            return []
+
+        try:
+            result = await chat_frame.evaluate("""() => {
+                const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                const isVisible = (element) => {
+                    if (!element) {
+                        return false;
+                    }
+                    const rect = element.getBoundingClientRect();
+                    const style = window.getComputedStyle(element);
+                    return rect.width > 0 && rect.height > 0 &&
+                        style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        Number(style.opacity || '1') !== 0;
+                };
+
+                const readAuthor = (message) => {
+                    const row = message.querySelector('.yamb-message-row') || message;
+                    const authorElement = row.querySelector('.yamb-message-user__name');
+                    if (!authorElement) {
+                        return '';
+                    }
+                    const additional = authorElement.querySelector('.yamb-message-user__additional-text');
+                    const additionalText = clean(additional?.innerText || additional?.textContent);
+                    let author = clean(authorElement.innerText || authorElement.textContent);
+                    if (additionalText && author.endsWith(additionalText)) {
+                        author = clean(author.slice(0, -additionalText.length));
+                    }
+                    return author;
+                };
+
+                const readText = (balloon) => {
+                    const textParts = Array.from(balloon.querySelectorAll('.yamb-message-text .text, .text'))
+                        .filter(isVisible)
+                        .map((element) => clean(element.innerText || element.textContent))
+                        .filter(Boolean);
+                    if (textParts.length > 0) {
+                        return textParts.join(' ');
+                    }
+
+                    const clone = balloon.cloneNode(true);
+                    clone.querySelectorAll('.yamb-message-info, .yamb-message-info__time').forEach((node) => node.remove());
+                    return clean(clone.innerText || clone.textContent);
+                };
+
+                const readTime = (balloon) => {
+                    const timeElement = balloon.querySelector('.yamb-message-info__time, .yamb-message-info');
+                    return clean(timeElement?.getAttribute('aria-label') || timeElement?.innerText || timeElement?.textContent);
+                };
+
+                const messageNodes = Array.from(document.querySelectorAll('.message'))
+                    .filter(isVisible)
+                    .sort((left, right) => left.getBoundingClientRect().y - right.getBoundingClientRect().y);
+                const messages = [];
+                let lastKnownAuthor = '';
+
+                for (const message of messageNodes) {
+                    const explicitAuthor = readAuthor(message);
+                    if (explicitAuthor) {
+                        lastKnownAuthor = explicitAuthor;
+                    }
+                    const author = explicitAuthor || lastKnownAuthor;
+                    const balloons = Array.from(message.querySelectorAll('.yamb-message-balloon, .message-balloon'))
+                        .filter(isVisible);
+
+                    for (const balloon of balloons) {
+                        const time = readTime(balloon);
+                        let text = readText(balloon);
+                        if (time && text.endsWith(time)) {
+                            text = clean(text.slice(0, -time.length));
+                        }
+                        text = clean(text.replace(/\\s+\\d{1,2}:\\d{2}$/, ''));
+                        if (!text) {
+                            continue;
+                        }
+                        const rect = balloon.getBoundingClientRect();
+                        messages.push({
+                            author,
+                            explicitAuthor,
+                            text,
+                            time,
+                            className: typeof balloon.className === 'string' ? balloon.className : '',
+                            x: Math.round(rect.x),
+                            y: Math.round(rect.y),
+                            width: Math.round(rect.width),
+                            height: Math.round(rect.height),
+                        });
+                    }
+                }
+
+                const deduped = messages.filter((item, index, items) => {
+                    return items.findIndex((other) =>
+                        other.author === item.author &&
+                        other.text === item.text &&
+                        other.time === item.time &&
+                        Math.abs(other.y - item.y) <= 4
+                    ) === index;
+                }).slice(-100);
+
+                return {
+                    messages: deduped,
+                    debug: {
+                        strategy: 'chat-iframe-clean-messages',
+                        frameUrl: window.location.href,
+                        bodyTextSample: clean(document.body.innerText).slice(0, 1200),
+                        messageNodes: messageNodes.length,
+                        cleanMessages: deduped.length,
+                        messages: deduped,
+                    },
+                };
+            }""")
+        except Exception as error:
+            self._write_debug_snapshot(
+                {
+                    "strategy": "chat-iframe-clean-messages",
+                    "reason": "chat frame evaluate failed",
+                    "frameUrl": chat_frame.url,
+                    "error": str(error),
+                    "frames": [frame.url for frame in self.page.frames],
+                }
+            )
+            return []
+
+        self._write_debug_snapshot(result.get("debug", {}))
+        return result.get("messages", [])
+
+    async def _handle_new_messages(self, messages: list[dict]) -> None:
+        for message in messages:
+            command = self._parse_confidential_command(str(message.get("text", "")))
+            if not command:
+                continue
+
+            key = self._message_key(message)
+            if key in self._handled_command_keys:
+                continue
+            self._handled_command_keys.add(key)
+
+            response = self._confidential_response(command)
+            result = await self._send_service_message(response)
+            self.logger(f"[Bot] Confidential command response result: {result}")
+            await self._notify_confidential_event("before_participant_cleanup", command)
+            participants_result = await self._open_participants_panel_after_confidential_command(command)
+            self.logger(f"[Bot] Confidential participants panel result: {participants_result}")
+            await self._notify_confidential_event("after_participant_cleanup", command)
+
+    async def _notify_confidential_event(self, stage: str, participants: str) -> None:
+        if self.confidential_event_handler is None:
+            return
+        try:
+            result = self.confidential_event_handler(stage, participants)
+            if hasattr(result, "__await__"):
+                await result
+        except Exception as error:
+            self.logger(f"[Bot] Confidential event handler failed ({stage}): {error}")
+
+    async def _open_participants_panel_after_confidential_command(self, participants: str) -> str:
+        protected_names = self._parse_protected_participant_names(participants)
+        click_result = await self._click_participants_button()
+        await self.page.wait_for_timeout(500)
+        screenshot_path = self._screenshot_path("confidential_participants")
+        await self.page.screenshot(path=str(screenshot_path), full_page=True)
+        self.logger(f"[Bot] Confidential participants screenshot saved: {screenshot_path}")
+
+        action_result = {
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "bot_id": self.bot_id,
+            "protected_names": sorted(protected_names),
+            "click_result": click_result,
+            "removed": [],
+            "stopped_at": None,
+        }
+
+        max_removals = int(os.getenv("TELEMOST_CHAT_COMMANDS_MAX_REMOVALS", "20"))
+        for attempt in range(1, max_removals + 1):
+            menu_result = await self._click_participant_actions_button(protected_names)
+            await self.page.wait_for_timeout(500)
+            if menu_result.startswith("no removable participants") or menu_result.startswith("participant actions button not found"):
+                action_result["stopped_at"] = menu_result
+                break
+
+            menu_screenshot_path = self._screenshot_path(f"confidential_participant_menu_{attempt}")
+            await self.page.screenshot(path=str(menu_screenshot_path), full_page=True)
+            self.logger(f"[Bot] Confidential participant menu screenshot saved: {menu_screenshot_path}")
+
+            remove_result = await self._click_remove_from_meeting_option()
+            await self.page.wait_for_timeout(700)
+            remove_screenshot_path = self._screenshot_path(f"confidential_remove_from_meeting_{attempt}")
+            await self.page.screenshot(path=str(remove_screenshot_path), full_page=True)
+            self.logger(f"[Bot] Confidential remove participant screenshot saved: {remove_screenshot_path}")
+
+            confirm_result = await self._click_confirm_remove_from_meeting_button()
+            await self.page.wait_for_timeout(1200)
+            confirmed_screenshot_path = self._screenshot_path(f"confidential_remove_confirmed_{attempt}")
+            await self.page.screenshot(path=str(confirmed_screenshot_path), full_page=True)
+            self.logger(f"[Bot] Confidential remove confirmed screenshot saved: {confirmed_screenshot_path}")
+
+            action_result["removed"].append(
+                {
+                    "attempt": attempt,
+                    "menu_result": menu_result,
+                    "remove_result": remove_result,
+                    "confirm_result": confirm_result,
+                }
+            )
+
+            if not remove_result.startswith("clicked remove") or not confirm_result.startswith("clicked confirm remove"):
+                action_result["stopped_at"] = "removal failed"
+                break
+
+            await self.page.wait_for_timeout(800)
+        else:
+            action_result["stopped_at"] = f"max removals reached: {max_removals}"
+
+        action_debug_path = Path(f"chat_commands_action_debug_{self.bot_id}.jsonl")
+        with action_debug_path.open("a", encoding="utf-8") as debug_file:
+            debug_file.write(json.dumps(action_result, ensure_ascii=False) + "\n")
+        return json.dumps(action_result, ensure_ascii=False)
+
+    async def _click_confirm_remove_from_meeting_button(self) -> str:
+        result = await self.page.evaluate("""() => {
+            const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+            const removeText = '\\u0423\\u0434\\u0430\\u043b\\u0438\\u0442\\u044c';
+            const isVisible = (element) => {
+                if (!element) {
+                    return false;
+                }
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    Number(style.opacity || '1') !== 0 &&
+                    !element.disabled;
+            };
+            const isDisabled = (element) => {
+                const disabledAttr = element.getAttribute('aria-disabled') === 'true' || element.getAttribute('data-disabled') === 'true';
+                const className = typeof element.className === 'string' ? element.className.toLowerCase() : '';
+                return disabledAttr || className.includes('disabled');
+            };
+            const clickElement = (element) => {
+                element.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+                element.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }));
+                element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+            };
+            const describe = (element) => {
+                const rect = element.getBoundingClientRect();
+                const text = clean(element.innerText || element.textContent || element.getAttribute('title') || '');
+                return `${text || 'unknown'} @ ${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.width)},${Math.round(rect.height)}`;
+            };
+
+            const actionBars = Array.from(document.querySelectorAll('[data-testid="orb-modal-action-bar"], .Orb-Modal2-ActionBar'))
+                .filter(isVisible);
+            const actionBar = actionBars[actionBars.length - 1] || document.body;
+            const buttons = Array.from(actionBar.querySelectorAll('button, [role="button"]'))
+                .filter(isVisible)
+                .filter((element) => !isDisabled(element))
+                .map((element) => ({
+                    element,
+                    text: clean(element.innerText || element.textContent),
+                    className: typeof element.className === 'string' ? element.className : '',
+                }))
+                .filter((item) => item.text === removeText || item.text.includes(removeText))
+                .sort((left, right) => {
+                    const leftBrand = left.className.includes('Orb-Button_view_brand') ? 0 : 1;
+                    const rightBrand = right.className.includes('Orb-Button_view_brand') ? 0 : 1;
+                    return leftBrand - rightBrand;
+                });
+
+            const target = buttons[0]?.element;
+            if (!target) {
+                return 'confirm remove button not found';
+            }
+            clickElement(target);
+            return `clicked confirm remove: ${describe(target)}`;
+        }""")
+        return result
+
+    async def _click_remove_from_meeting_option(self) -> str:
+        result = await self.page.evaluate(r"""async () => {
+            const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+            const removeText = '\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u043e \u0432\u0441\u0442\u0440\u0435\u0447\u0438';
+            const confirmTitle = '\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u043e \u0432\u0441\u0442\u0440\u0435\u0447\u0438?';
+            const afterRemoveText = '\u041f\u043e\u0441\u043b\u0435 \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u044f';
+            const isVisible = (element) => {
+                if (!element) return false;
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    Number(style.opacity || '1') !== 0;
+            };
+            const modalIsOpen = () => {
+                const text = document.body?.innerText || '';
+                return text.includes(confirmTitle) || text.includes(afterRemoveText);
+            };
+            const clickElement = async (element) => {
+                element.scrollIntoView({ block: 'center', inline: 'center' });
+                await new Promise((resolve) => setTimeout(resolve, 150));
+                const rect = element.getBoundingClientRect();
+                const x = rect.left + rect.width / 2;
+                const y = rect.top + rect.height / 2;
+                const target = document.elementFromPoint(x, y) || element;
+                const clickable = target.closest?.('div[class*="option_"], button, [role="button"]') || element;
+                clickable.focus?.({ preventScroll: true });
+                const pointer = (type, buttons = 0) => new PointerEvent(type, {
+                    bubbles: true, cancelable: true, composed: true, view: window,
+                    button: 0, buttons, clientX: x, clientY: y, screenX: x, screenY: y,
+                    pointerId: 1, pointerType: 'mouse', isPrimary: true,
+                });
+                const mouse = (type, buttons = 0) => new MouseEvent(type, {
+                    bubbles: true, cancelable: true, composed: true, view: window,
+                    button: 0, buttons, clientX: x, clientY: y, screenX: x, screenY: y,
+                });
+                clickable.dispatchEvent(pointer('pointerover'));
+                clickable.dispatchEvent(mouse('mouseover'));
+                clickable.dispatchEvent(pointer('pointerdown', 1));
+                clickable.dispatchEvent(mouse('mousedown', 1));
+                await new Promise((resolve) => setTimeout(resolve, 80));
+                clickable.dispatchEvent(pointer('pointerup'));
+                clickable.dispatchEvent(mouse('mouseup'));
+                clickable.dispatchEvent(mouse('click'));
+                clickable.click?.();
+                await new Promise((resolve) => setTimeout(resolve, 500));
+                return `${clean(clickable.innerText || clickable.textContent || clickable.getAttribute?.('title') || '')} @ ${Math.round(x)},${Math.round(y)}`;
+            };
+
+            const popovers = Array.from(document.querySelectorAll('[data-testid="orb-popover"], [data-test-id="more-button-popover"], [class*="ModerationPopup"]'))
+                .filter(isVisible)
+                .filter((element) => (element.innerText || element.textContent || '').includes(removeText));
+            const popover = popovers[popovers.length - 1];
+            if (!popover) {
+                return 'remove popover not found near participant actions button';
+            }
+
+            const candidates = Array.from(popover.querySelectorAll('div[class*="option_"], [title]'))
+                .filter(isVisible)
+                .map((element) => ({
+                    element,
+                    text: clean(element.innerText || element.textContent || ''),
+                    title: clean(element.getAttribute('title') || ''),
+                    rect: element.getBoundingClientRect(),
+                }))
+                .filter((item) => item.title === removeText || item.text.includes(removeText))
+                .sort((left, right) => left.rect.y - right.rect.y);
+
+            const option = candidates[0]?.element;
+            if (!option) {
+                return `remove option not found inside selected popover; popovers=${popovers.length}`;
+            }
+
+            const clicked = await clickElement(option);
+            if (modalIsOpen()) {
+                return `clicked remove from meeting: ${clicked}`;
+            }
+            return `remove option clicked but modal not opened: ${clicked}; popovers=${popovers.length}`;
+        }""")
+        return result
+
+    async def _click_participant_actions_button(self, protected_names: set[str] | None = None) -> str:
+        """Open moderation menu for the next participant outside the protected list."""
+        protected_names = protected_names or set()
+        rows = self.page.locator('div[class*="Participant_"]')
+        row_count = await rows.count()
+        bot_name_markers = (
+            "\u0412\u0435\u0440\u0442\u0435\u0440 \u0420\u043e\u0431\u043e\u0442",
+            "Telemost Bot",
+        )
+        remove_text = "\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u0441\u043e \u0432\u0441\u0442\u0440\u0435\u0447\u0438"
+
+        candidates = []
+        skipped = []
+        for index in range(row_count):
+            row = rows.nth(index)
+            try:
+                if not await row.is_visible(timeout=500):
+                    continue
+                box = await row.bounding_box(timeout=500)
+                if not box or box["width"] <= 0 or box["height"] < 32:
+                    continue
+                display_name = await self._participant_display_name(row)
+                row_text = " ".join((await row.inner_text(timeout=1000)).split())
+                participant_name = display_name or row_text
+                normalized_name = self._normalize_participant_name(participant_name)
+                if any(marker.lower() in row_text.lower() for marker in bot_name_markers):
+                    skipped.append(f"bot:{participant_name}")
+                    continue
+                if normalized_name in protected_names:
+                    skipped.append(f"protected:{participant_name}")
+                    continue
+                if await row.locator('button[data-testid="more-popup-alt-button"]').count() <= 0:
+                    skipped.append(f"no-more:{participant_name}")
+                    continue
+                candidates.append((box["y"], row, participant_name, box))
+            except Exception as error:
+                skipped.append(f"row-error:{error}")
+                continue
+
+        if not candidates:
+            details = "; ".join(skipped[-8:])
+            return f"no removable participants found; protected={sorted(protected_names)}; skipped={details}"
+
+        async def popover_is_open() -> bool:
+            return await self.page.evaluate(
+                """(removeText) => Array.from(document.querySelectorAll('[data-testid="orb-popover"], [data-test-id="more-button-popover"], [class*="ModerationPopup"]'))
+                    .some((element) => {
+                        const rect = element.getBoundingClientRect();
+                        const style = window.getComputedStyle(element);
+                        const text = element.innerText || element.textContent || '';
+                        return rect.width > 0 && rect.height > 0 &&
+                            style.display !== 'none' &&
+                            style.visibility !== 'hidden' &&
+                            text.includes(removeText);
+                    })""",
+                remove_text,
+            )
+
+        errors = []
+        for _, row, participant_name, row_box in sorted(candidates, key=lambda item: item[0]):
+            try:
+                y = row_box["y"] + row_box["height"] / 2
+                await self.page.mouse.move(row_box["x"] + 18, y)
+                await self.page.wait_for_timeout(150)
+                await self.page.mouse.move(row_box["x"] + row_box["width"] - 20, y, steps=20)
+                await self.page.wait_for_timeout(450)
+
+                dom_result = await row.evaluate(
+                    """async (row) => {
+                        const button = row.querySelector('button[data-testid="more-popup-alt-button"]');
+                        if (!button) return 'dom button not found';
+                        button.focus?.({ preventScroll: true });
+                        button.click?.();
+                        return 'dom button click after real hover';
+                    }"""
+                )
+                await self.page.wait_for_timeout(700)
+                if await popover_is_open():
+                    await self.page.evaluate(
+                        """(payload) => { window.__telemostLastParticipantMoreButtonRect = payload; }""",
+                        {
+                            "x": row_box["x"] + row_box["width"] - 20,
+                            "y": y,
+                            "left": row_box["x"],
+                            "top": row_box["y"],
+                            "right": row_box["x"] + row_box["width"],
+                            "bottom": row_box["y"] + row_box["height"],
+                            "participantText": participant_name,
+                        },
+                    )
+                    return f"clicked participant actions via {dom_result}: {participant_name}; popover_opened=True"
+
+                errors.append(f"{participant_name}: {dom_result}; popover_opened=False")
+                await self.page.keyboard.press("Escape")
+                await self.page.wait_for_timeout(250)
+            except Exception as error:
+                errors.append(f"{participant_name}: {error}")
+                try:
+                    await self.page.keyboard.press("Escape")
+                except Exception:
+                    pass
+
+        return "participant actions menu not opened; " + " | ".join(errors[-5:])
+
+    async def _click_participants_button(self) -> str:
+        result = await self.page.evaluate("""() => {
+            const isVisibleAndEnabled = (element) => {
+                if (!element) {
+                    return false;
+                }
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    Number(style.opacity || '1') !== 0 &&
+                    !element.disabled;
+            };
+
+            const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+            const getLabels = (element) => {
+                const text = clean(element.innerText || element.textContent);
+                const ariaLabel = clean(element.getAttribute('aria-label') || '');
+                const title = clean(element.getAttribute('title') || '');
+                const testId = clean(element.getAttribute('data-testid') || '');
+                const combined = `${text} ${ariaLabel} ${title} ${testId}`.toLowerCase();
+                return { text, ariaLabel, title, testId, combined };
+            };
+
+            const isParticipantsControl = (element) => {
+                const { text, ariaLabel, title, combined } = getLabels(element);
+                return (
+                    text.toLowerCase().startsWith('\u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438') ||
+                    ariaLabel.toLowerCase().includes('\u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a') ||
+                    title.toLowerCase().includes('\u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a') ||
+                    combined.includes('participants')
+                );
+            };
+
+            const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+            const participantsButton = buttons.find((button) =>
+                isVisibleAndEnabled(button) && isParticipantsControl(button)
+            );
+            if (!participantsButton) {
+                return 'participants button not found';
+            }
+
+            const { text, ariaLabel, title, testId } = getLabels(participantsButton);
+            participantsButton.click();
+            return `clicked participants: ${ariaLabel || title || testId || text || 'unknown'}`;
+        }""")
+        return result
+
+    async def _participant_display_name(self, row) -> str:
+        try:
+            display_names = row.locator('span[class*="DisplayName_"]')
+            count = await display_names.count()
+            if count > 0:
+                return " ".join((await display_names.first.inner_text(timeout=1000)).split())
+        except Exception:
+            pass
+        return ""
+
+    def _parse_protected_participant_names(self, participants: str) -> set[str]:
+        normalized = self._normalize_message_text(participants)
+        if not normalized:
+            return set()
+
+        separators = [",", ";", "\n", " ? "]
+        parts = [normalized]
+        for separator in separators:
+            next_parts = []
+            for part in parts:
+                next_parts.extend(piece.strip() for piece in part.split(separator))
+            parts = next_parts
+
+        if len(parts) == 1:
+            words = [word for word in parts[0].split() if word]
+            if len(words) > 2 and len(words) % 2 == 0:
+                parts = [" ".join(words[index:index + 2]) for index in range(0, len(words), 2)]
+
+        names = {self._normalize_participant_name(part) for part in parts if self._normalize_participant_name(part)}
+        names.add(self._normalize_participant_name(normalized))
+        return names
+
+    def _normalize_participant_name(self, value: str) -> str:
+        return " ".join(str(value).replace("?", "?").replace("?", "?").lower().split()).strip()
+
+    def _parse_confidential_command(self, text: str) -> str | None:
+        normalized = self._normalize_message_text(text).lower()
+        original = self._normalize_message_text(text)
+        for prefix in self.CONFIDENTIAL_PREFIXES:
+            if normalized.startswith(prefix):
+                participants = original[len(prefix):].strip()
+                return participants or None
+        return None
+
+    def _confidential_response(self, participants: str) -> str:
+        return (
+            "\u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u044b\u0439 "
+            "\u0440\u0435\u0436\u0438\u043c \u0432\u043a\u043b\u044e\u0447\u0435\u043d \u0434\u043b\u044f: "
+            f"{participants}. "
+            "\u041f\u0440\u0438\u0441\u0442\u0443\u043f\u0430\u044e \u043a \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u044e "
+            "\u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0445 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432 "
+            "\u0438 \u0437\u0430\u043f\u0438\u0441\u0438 \u043d\u043e\u0432\u043e\u0433\u043e "
+            "\u0430\u0443\u0434\u0438\u043e\u043f\u0440\u043e\u0442\u043e\u043a\u043e\u043b\u0430."
+        )
+
+    def _find_chat_frame(self):
+        for frame in self.page.frames:
+            if "yandex.ru/chat" in frame.url:
+                return frame
+        return None
+
+    def _write_debug_snapshot(self, debug_data: dict) -> None:
+        record = {
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "bot_id": self.bot_id,
+            "debug": debug_data,
+        }
+        self._debug_path().write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _debug_path(self) -> Path:
+        return Path.cwd() / f"chat_commands_debug_{self.bot_id}.json"
+
+    def _append_new_messages(self, messages: list[dict]) -> list[dict]:
+        new_records = []
+        new_messages = []
+        for message in messages:
+            if self._is_own_service_message(message):
+                continue
+            key = self._message_key(message)
+            if key in self._seen_message_keys:
+                continue
+            self._seen_message_keys.add(key)
+            new_messages.append(message)
+            new_records.append(
+                {
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "bot_id": self.bot_id,
+                    "message_key": key,
+                    "message": message,
+                }
+            )
+
+        if not new_records:
+            return new_messages
+
+        path = self._messages_path()
+        with path.open("a", encoding="utf-8") as file_obj:
+            for record in new_records:
+                file_obj.write(json.dumps(record, ensure_ascii=False) + "\n")
+        return new_messages
+
+    def _is_own_service_message(self, message: dict) -> bool:
+        text = self._normalize_message_text(str(message.get("text", "")))
+        return bool(text and text in self._bot_sent_texts)
+
+    def _normalize_message_text(self, text: str) -> str:
+        return " ".join(text.split()).strip()
+
+    def _cleanup_debug_artifacts(self) -> None:
+        if os.getenv("TELEMOST_CHAT_COMMANDS_CLEANUP_DEBUG_FILES", "True") != "True":
+            return
+
+        patterns = [
+            f"chat_commands_debug_{self.bot_id}.json",
+            f"chat_commands_messages_{self.bot_id}.jsonl",
+            f"chat_commands_probe_*_{self.bot_id}_*.png",
+        ]
+        for pattern in patterns:
+            for artifact in Path.cwd().glob(pattern):
+                try:
+                    artifact.unlink()
+                    self.logger(f"[Bot] Removed chat debug artifact: {artifact}")
+                except FileNotFoundError:
+                    pass
+                except Exception as error:
+                    self.logger(f"[Bot] Could not remove chat debug artifact {artifact}: {error}")
+
+    def _message_key(self, message: dict) -> str:
+        return "|".join(
+            [
+                str(message.get("author", "")),
+                str(message.get("text", "")),
+                str(message.get("time", "")),
+            ]
+        )
+
+    def _messages_path(self) -> Path:
+        return Path.cwd() / f"chat_commands_messages_{self.bot_id}.jsonl"
+
+    def _screenshot_path(self, stage: str) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"chat_commands_probe_{stage}_{self.bot_id}_{timestamp}.png"
+        return Path.cwd() / filename

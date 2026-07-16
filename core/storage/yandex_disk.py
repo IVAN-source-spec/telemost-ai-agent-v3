@@ -388,7 +388,87 @@ class YandexDiskUploader:
             if not path.name.endswith("_summary.json")
         ]
         pyannote_txt = list(meeting_dir.glob("recording_meeting_pyannote_*.txt"))
-        return bool(pyannote_json and pyannote_txt)
+        if not (pyannote_json and pyannote_txt):
+            return False
+
+        for confidential_dir in YandexDiskUploader._confidential_part_dirs(meeting_dir):
+            if not YandexDiskUploader._confidential_part_complete(confidential_dir):
+                return False
+        return True
+
+    @staticmethod
+    def _confidential_part_dirs(meeting_dir: Path) -> list[Path]:
+        confidential_names = {
+            "\u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u0430\u044f \u0447\u0430\u0441\u0442\u044c",
+            "confidential_part",
+        }
+        return [
+            path
+            for path in meeting_dir.iterdir()
+            if path.is_dir() and path.name in confidential_names
+        ]
+
+    @staticmethod
+    def _confidential_part_complete(confidential_dir: Path) -> bool:
+        status_path = confidential_dir / "confidential_recording_status.json"
+        if not status_path.exists():
+            print(f"[YandexDisk] Confidential part status is missing, upload skipped: {confidential_dir}")
+            return False
+        try:
+            status_data = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception as error:
+            print(f"[YandexDisk] Could not read confidential status, upload skipped: {status_path}: {error}")
+            return False
+        if status_data.get("status") != "completed":
+            print(
+                "[YandexDisk] Confidential part is not completed yet, upload skipped: "
+                f"{confidential_dir} status={status_data.get('status')}"
+            )
+            return False
+
+        transcription_status_path = confidential_dir / "transcription_status.json"
+        if not transcription_status_path.exists():
+            print(
+                "[YandexDisk] Confidential transcription status is missing, upload skipped: "
+                f"{transcription_status_path}"
+            )
+            return False
+        try:
+            transcription_status = json.loads(transcription_status_path.read_text(encoding="utf-8"))
+        except Exception as error:
+            print(
+                "[YandexDisk] Could not read confidential transcription status, upload skipped: "
+                f"{transcription_status_path}: {error}"
+            )
+            return False
+        if transcription_status.get("status") != "completed":
+            print(
+                "[YandexDisk] Confidential transcription is not completed yet, upload skipped: "
+                f"{confidential_dir} status={transcription_status.get('status')}"
+            )
+            return False
+
+        required_files = [
+            confidential_dir / "meeting_time.json",
+            confidential_dir / "recording_meeting.wav",
+            status_path,
+            transcription_status_path,
+        ]
+        for required_path in required_files:
+            if not required_path.exists() or not required_path.is_file() or required_path.stat().st_size <= 0:
+                print(f"[YandexDisk] Confidential required file is missing or empty, upload skipped: {required_path}")
+                return False
+
+        pyannote_json = [
+            candidate
+            for candidate in confidential_dir.glob("recording_meeting_pyannote_*.json")
+            if not candidate.name.endswith("_summary.json")
+        ]
+        pyannote_txt = list(confidential_dir.glob("recording_meeting_pyannote_*.txt"))
+        if not (pyannote_json and pyannote_txt):
+            print(f"[YandexDisk] Confidential pyannote files are missing, upload skipped: {confidential_dir}")
+            return False
+        return True
 
     def finalize_meeting_folder(self, meeting_dir: Path) -> bool:
         if not self.config.enabled:

@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import builtins
 import json
 import os
@@ -11,6 +11,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from core.constants import USER_AGENT, VIEWPORT, CHROMIUM_ARGS
 from core.storage.meeting_storage import MeetingArtifacts, get_meeting_storage
+from core.browser_bot.chat_commands import ChatCommandsModule
 
 DEFAULT_STORAGE_STATE_PATH = "data/auth/yandex-session.json"
 DEFAULT_COOKIES_PATH = "data/auth/cookies.json"
@@ -41,6 +42,14 @@ class TelemostBot:
         self.meeting_started_at = None
         self.meeting_ended_at = None
         self.meeting_duration_seconds = 0
+        self.recording_audio_path: Path | None = None
+        self.confidential_dir: Path | None = None
+        self.confidential_started_at = None
+        self.confidential_ended_at = None
+        self.confidential_duration_seconds = 0
+        self.confidential_participants = None
+        self.confidential_max_participants = 0
+        self.confidential_recording_active = False
         self.reconnect_events = []
         self.auth_ok = False
         self._last_valid_participant_count = 0
@@ -380,6 +389,21 @@ class TelemostBot:
         await self._mute_microphone_js()
 
         self._start_recording()
+        await self._run_chat_commands_probe_if_enabled()
+
+    async def _run_chat_commands_probe_if_enabled(self) -> None:
+        if os.getenv("TELEMOST_CHAT_COMMANDS_ENABLED", "False") != "True":
+            return
+        try:
+            module = ChatCommandsModule(
+                page=self.page,
+                logger=self._print,
+                bot_id=self.bot_id,
+                confidential_event_handler=self._handle_confidential_mode_event,
+            )
+            await module.run_probe()
+        except Exception as error:
+            self._print(f"[Bot] Chat commands probe failed: {error}")
 
     def _meeting_dir(self) -> Path:
         return self._meeting_artifacts().meeting_dir
@@ -479,43 +503,145 @@ class TelemostBot:
             encoding="utf-8",
         )
 
-    def _start_recording(self):
-        """Запускает запись аудио в фоновом потоке."""
+    def _start_recording(self, audio_path: str | Path | None = None):
+        """Start audio recording in a background thread."""
         if self.recorder is None:
+            self.recording_audio_path = Path(audio_path) if audio_path else self._meeting_artifacts().audio_path
+            self.recording_audio_path.parent.mkdir(parents=True, exist_ok=True)
             self.recorder = AudioRecorder(log_prefix=f"[AudioRecorder:{self.bot_id}]")
             self.recorder.start()
-            self._print("[Bot] Audio recording started")
+            self._print(f"[Bot] Audio recording started: {self.recording_audio_path}")
 
     def _stop_recording(self):
         if self.recorder is None:
             return
         self.recorder.stop()
-        if self.session_id:
+        if self.recording_audio_path is not None:
+            filename = self.recording_audio_path
+        elif self.session_id:
             filename = self._meeting_artifacts().audio_path
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"recording_{timestamp}.wav"
+            filename = Path(f"recording_{timestamp}.wav")
         self.recorder.save(str(filename))
         self.recorder.close()
         self.recorder = None
         self._print(f"[Bot] Audio recording saved to {filename}")
+
+    async def _handle_confidential_mode_event(self, stage: str, participants: str) -> None:
+        if stage == "before_participant_cleanup":
+            if self.confidential_started_at is not None:
+                self._print("[Bot] Confidential recording mode is already initialized")
+                return
+            self.confidential_participants = participants
+            self._print(f"[Bot] Confidential mode requested for: {participants}")
+            self._stop_recording()
+            self._write_meeting_time()
+            return
+
+        if stage == "after_participant_cleanup":
+            if self.confidential_recording_active:
+                return
+            await self._start_confidential_recording(participants)
+
+    async def _start_confidential_recording(self, participants: str) -> None:
+        self.confidential_participants = participants
+        self.confidential_started_at = datetime.now(timezone.utc)
+        self.confidential_ended_at = None
+        self.confidential_duration_seconds = 0
+        self.confidential_max_participants = 0
+        self.confidential_recording_active = True
+        self.confidential_dir = self._meeting_dir() / "\u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u0430\u044f \u0447\u0430\u0441\u0442\u044c"
+        self.confidential_dir.mkdir(parents=True, exist_ok=True)
+        self._write_confidential_meeting_time()
+        self._write_confidential_recording_status("recording")
+        self._start_recording(self.confidential_dir / "recording_meeting.wav")
+        self._print(f"[Bot] Confidential recording started: {self.confidential_dir}")
+
+    def _finish_confidential_recording_timer(self) -> None:
+        if self.confidential_started_at is None or self.confidential_ended_at is not None:
+            return
+        self.confidential_ended_at = datetime.now(timezone.utc)
+        self.confidential_duration_seconds = int(
+            (self.confidential_ended_at - self.confidential_started_at).total_seconds()
+        )
+        self.confidential_recording_active = False
+        self._write_confidential_meeting_time()
+        self._write_confidential_recording_status("completed")
+        self._print(
+            "[Bot] Confidential duration: "
+            f"{self._format_duration(self.confidential_duration_seconds)}"
+        )
+
+    def _write_confidential_meeting_time(self) -> None:
+        if self.confidential_started_at is None or self.confidential_dir is None:
+            return
+        payload = {
+            "session_id": self.session_id,
+            "title": "\u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u0430\u044f \u0447\u0430\u0441\u0442\u044c",
+            "parent_meeting_title": self._meeting_artifacts().title,
+            "participants": self.confidential_participants,
+            "started_at": self.confidential_started_at.isoformat(),
+            "ended_at": self.confidential_ended_at.isoformat() if self.confidential_ended_at else None,
+            "duration_seconds": self.confidential_duration_seconds,
+            "duration_formatted": self._format_duration(self.confidential_duration_seconds),
+            "max_participants": self.confidential_max_participants,
+            "audio_path": str(self.confidential_dir / "recording_meeting.wav"),
+        }
+        (self.confidential_dir / "meeting_time.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _write_confidential_recording_status(self, status: str) -> None:
+        if self.confidential_started_at is None or self.confidential_dir is None:
+            return
+        audio_path = self.confidential_dir / "recording_meeting.wav"
+        payload = {
+            "session_id": self.session_id,
+            "status": status,
+            "participants": self.confidential_participants,
+            "started_at": self.confidential_started_at.isoformat(),
+            "ended_at": self.confidential_ended_at.isoformat() if self.confidential_ended_at else None,
+            "duration_seconds": self.confidential_duration_seconds,
+            "duration_formatted": self._format_duration(self.confidential_duration_seconds),
+            "max_participants": self.confidential_max_participants,
+            "audio_path": str(audio_path),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        (self.confidential_dir / "confidential_recording_status.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     async def get_participant_count(self) -> int:
         """Возвращает количество других участников на встрече (исключая бота)."""
         try:
             result = await self.page.evaluate('''() => {
                 // === 1. Ищем число участников в интерфейсе ===
-                const allElements = document.querySelectorAll('*');
                 const patterns = [
-                    /Участники\s*[:.]?\s*(\d+)/i,
-                    /Участник\s*[:.]?\s*(\d+)/i,
-                    /Participants\s*[:.]?\s*(\d+)/i,
-                    /Participant\s*[:.]?\s*(\d+)/i,
+                    /^\u0423\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438\s*[:.]?\s*(\d+)$/i,
+                    /^\u0423\u0447\u0430\u0441\u0442\u043d\u0438\u043a\s*[:.]?\s*(\d+)$/i,
+                    /^Participants\s*[:.]?\s*(\d+)$/i,
+                    /^Participant\s*[:.]?\s*(\d+)$/i,
                 ];
+                const isVisible = (element) => {
+                    const rect = element.getBoundingClientRect();
+                    const style = window.getComputedStyle(element);
+                    return rect.width > 0 && rect.height > 0 &&
+                        style.display !== 'none' &&
+                        style.visibility !== 'hidden' &&
+                        Number(style.opacity || '1') !== 0;
+                };
+                const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
 
                 let interfaceCount = null;
-                for (const el of allElements) {
-                    const text = el.textContent || '';
+                const countElements = Array.from(document.querySelectorAll('button, [role="button"], [aria-label], [title], [data-testid]'))
+                    .filter(isVisible)
+                    .map((el) => clean(`${el.innerText || el.textContent || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`))
+                    .filter((text) => text.length > 0 && text.length <= 40);
+
+                for (const text of countElements) {
                     for (const pattern of patterns) {
                         const match = text.match(pattern);
                         if (match) {
@@ -547,7 +673,7 @@ class TelemostBot:
                 let count = 0;
                 if (interfaceCount !== null) {
                     // Если нашли число в интерфейсе — вычитаем бота (если он вошёл)
-                    count = interfaceCount - (hasSelfVideo ? 1 : 0);
+                    count = interfaceCount - 1;
                 } else {
                     // Fallback: используем количество видео
                     count = videoCount;
@@ -673,6 +799,7 @@ class TelemostBot:
     async def leave(self):
         """Закрывает браузер и завершает запись."""
         self._finish_meeting_timer()
+        self._finish_confidential_recording_timer()
         self._stop_recording()
 
         if self.page:
@@ -723,6 +850,10 @@ class TelemostBot:
             if participants > max_participants:
                 max_participants = participants
                 self._print(f"[Bot] Max participants detected: {max_participants}")
+            if self.confidential_recording_active and participants > self.confidential_max_participants:
+                self.confidential_max_participants = participants
+                self._write_confidential_meeting_time()
+                self._print(f"[Bot] Confidential max participants detected: {self.confidential_max_participants}")
 
             if participants == 0:
                 alone_seconds += 5
@@ -751,3 +882,7 @@ class TelemostBot:
         if self.meeting_artifacts:
             config["meeting_dir"] = str(self.meeting_artifacts.meeting_dir)
             config["audio_path"] = str(self.meeting_artifacts.audio_path)
+        if self.confidential_dir:
+            config["confidential_dir"] = str(self.confidential_dir)
+            config["confidential_audio_path"] = str(self.confidential_dir / "recording_meeting.wav")
+            config["confidential_max_participants"] = self.confidential_max_participants

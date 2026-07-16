@@ -89,14 +89,14 @@ def request_json(
         return json.loads(resp.read().decode("utf-8"))
 
 
-def upload_file(audio_path: Path, signed_url: str) -> None:
+def upload_file(audio_path: Path, signed_url: str, *, timeout_seconds: int = int(os.getenv("PYANNOTE_UPLOAD_TIMEOUT_SECONDS", "3600"))) -> None:
     req = urllib.request.Request(
         signed_url,
         data=audio_path.read_bytes(),
         method="PUT",
         headers={"Content-Type": "application/octet-stream"},
     )
-    with urllib.request.urlopen(req, timeout=300) as resp:
+    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
         if resp.status != 200:
             raise RuntimeError(f"Upload failed with status {resp.status}")
 

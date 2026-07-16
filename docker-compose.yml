@@ -8,15 +8,27 @@ services:
     env_file:
       - .env
     environment:
-      PULSE_SERVER: unix:/run/user/1001/pulse/native
+      PULSE_SERVER: unix:/run/user/1002/pulse/native
       TELEMOST_AUTH_STATE_PATH: data/auth/yandex-session.json
       TELEMOST_AUTH_COOKIES_PATH: data/auth/cookies.json
+    command:
+      - sh
+      - -lc
+      - >
+        rm -f /tmp/.X99-lock /tmp/.X11-unix/X99;
+        Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp &
+        for i in $(seq 1 40); do
+          [ -S /tmp/.X11-unix/X99 ] && break;
+          sleep 0.25;
+        done;
+        export DISPLAY=:99;
+        exec python api_run.py
     ports:
       - "8000:8000"
     volumes:
       - ./data/auth:/app/data/auth:ro
       - ./recordings:/app/recordings
       - ./yandex_disk_upload_errors.jsonl:/app/yandex_disk_upload_errors.jsonl
-      - /run/user/1001/pulse/native:/run/user/1001/pulse/native
+      - /run/user/1002/pulse/native:/run/user/1002/pulse/native
       - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
     shm_size: "2gb"
