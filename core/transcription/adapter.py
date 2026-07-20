@@ -4,6 +4,10 @@ import sys
 import subprocess
 import glob
 import time
+import shutil
+import tempfile
+import wave
+import audioop
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
@@ -14,6 +18,63 @@ class TranscriptionAdapter:
         self.similarity_mode = similarity_mode
         self.base_dir = Path(__file__).resolve().parents[2]
         self.job_script = self.base_dir / "transcription_service" / "run_pyannote_job.py"
+
+
+    @staticmethod
+    def _env_bool(name: str, default: str = "0") -> bool:
+        return os.getenv(name, default).lower() in ("1", "true", "yes", "on")
+
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        try:
+            return int(os.getenv(name, str(default)))
+        except ValueError:
+            return default
+
+    def _should_compress_audio(self, audio_path: Path) -> bool:
+        if not self._env_bool("TRANSCRIPTION_COMPRESS_AUDIO_ENABLED", "1"):
+            return False
+        min_bytes = self._env_int("TRANSCRIPTION_COMPRESS_MIN_BYTES", 50_000_000)
+        return audio_path.stat().st_size >= max(1, min_bytes)
+
+    def _make_compact_wav(self, audio_path: Path) -> tuple[Path, Path]:
+        sample_rate = self._env_int("TRANSCRIPTION_COMPRESS_SAMPLE_RATE", 16000)
+        chunk_seconds = self._env_int("TRANSCRIPTION_COMPRESS_CHUNK_SECONDS", 30)
+        temp_dir = Path(tempfile.mkdtemp(prefix="telemost_transcription_"))
+        compact_path = temp_dir / audio_path.name
+
+        with wave.open(str(audio_path), "rb") as reader:
+            channels = reader.getnchannels()
+            sample_width = reader.getsampwidth()
+            source_rate = reader.getframerate()
+            chunk_frames = max(1, source_rate * max(1, chunk_seconds))
+            rate_state = None
+
+            with wave.open(str(compact_path), "wb") as writer:
+                writer.setnchannels(1)
+                writer.setsampwidth(2)
+                writer.setframerate(sample_rate)
+
+                while True:
+                    data = reader.readframes(chunk_frames)
+                    if not data:
+                        break
+                    if channels > 1:
+                        data = audioop.tomono(data, sample_width, 0.5, 0.5)
+                    if sample_width != 2:
+                        data = audioop.lin2lin(data, sample_width, 2)
+                    if source_rate != sample_rate:
+                        data, rate_state = audioop.ratecv(data, 2, 1, source_rate, sample_rate, rate_state)
+                    writer.writeframes(data)
+
+        return compact_path, temp_dir
+
+    def _move_results_to_original_audio(self, submitted_audio: Path, original_audio: Path) -> None:
+        if submitted_audio == original_audio:
+            return
+        for source in submitted_audio.parent.glob(f"{submitted_audio.stem}_pyannote_*"):
+            target_name = source.name.replace(f"{submitted_audio.stem}_pyannote_", f"{original_audio.stem}_pyannote_", 1)
+            shutil.copy2(source, original_audio.parent / target_name)
 
     @staticmethod
     def _find_job_json(audio_path: Path) -> Path | None:
@@ -61,11 +122,26 @@ class TranscriptionAdapter:
             print(f"[Adapter] Found existing job: {job_id}")
             return job_id
  
+        submitted_audio_path = audio_path
+        temp_dir: Path | None = None
+        if self._should_compress_audio(audio_path):
+            try:
+                submitted_audio_path, temp_dir = self._make_compact_wav(audio_path)
+                print(
+                    "[Adapter] Prepared compact audio for transcription: "
+                    f"{audio_path.stat().st_size} -> {submitted_audio_path.stat().st_size} bytes "
+                    f"({submitted_audio_path})"
+                )
+            except Exception as error:
+                print(f"[Adapter] Could not prepare compact audio, using original: {error}")
+                submitted_audio_path = audio_path
+                temp_dir = None
+
         # Формируем команду
         env = os.environ.copy()
         env["PYANNOTE_API_KEY"] = self.api_key
  
-        cmd = [sys.executable, str(self.job_script), str(audio_path)]
+        cmd = [sys.executable, str(self.job_script), str(submitted_audio_path)]
         if target_speakers is not None and target_speakers > 0:
             cmd.extend(["--speakers", str(target_speakers)])
         cmd.extend(["--timeout-seconds", str(timeout_seconds)])
@@ -79,37 +155,43 @@ class TranscriptionAdapter:
         # Используем subprocess.run, а не Popen, чтобы дождаться завершения
         max_attempts = int(os.getenv("PYANNOTE_SUBMIT_MAX_ATTEMPTS", "3"))
         result = None
-        for attempt in range(1, max_attempts + 1):
-            if attempt > 1:
-                print(f"[Adapter] Retrying pyannote job, attempt {attempt}/{max_attempts}")
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    env=env,
-                    timeout=timeout_seconds
-                )
-            except subprocess.TimeoutExpired as e:
-                stderr = str(e)
-                print(f"[Adapter] Process timed out: {stderr}")
-                if attempt >= max_attempts:
-                    raise RuntimeError(f"Pyannote job failed: {stderr}") from e
+        try:
+            for attempt in range(1, max_attempts + 1):
+                if attempt > 1:
+                    print(f"[Adapter] Retrying pyannote job, attempt {attempt}/{max_attempts}")
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        env=env,
+                        timeout=timeout_seconds
+                    )
+                except subprocess.TimeoutExpired as e:
+                    stderr = str(e)
+                    print(f"[Adapter] Process timed out: {stderr}")
+                    if attempt >= max_attempts:
+                        raise RuntimeError(f"Pyannote job failed: {stderr}") from e
+                    time.sleep(min(30, 2 ** attempt))
+                    continue
+
+                print(f"[Adapter] Process finished with code {result.returncode}")
+
+                if result.returncode == 0:
+                    break
+
+                print(f"[Adapter] STDERR: {result.stderr}")
+                if not self._is_retryable_failure(result.stderr) or attempt >= max_attempts:
+                    raise RuntimeError(f"Pyannote job failed: {result.stderr}")
                 time.sleep(min(30, 2 ** attempt))
-                continue
-
-            print(f"[Adapter] Process finished with code {result.returncode}")
-
-            if result.returncode == 0:
-                break
-
-            print(f"[Adapter] STDERR: {result.stderr}")
-            if not self._is_retryable_failure(result.stderr) or attempt >= max_attempts:
-                raise RuntimeError(f"Pyannote job failed: {result.stderr}")
-            time.sleep(min(30, 2 ** attempt))
  
-        if result is None or result.returncode != 0:
-            raise RuntimeError("Pyannote job failed without process result")
+            if result is None or result.returncode != 0:
+                raise RuntimeError("Pyannote job failed without process result")
+
+            self._move_results_to_original_audio(submitted_audio_path, audio_path)
+        finally:
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
  
         # Ищем созданный JSON-файл
         job_json = self._find_job_json(audio_path)
