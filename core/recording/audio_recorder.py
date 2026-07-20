@@ -1,3 +1,4 @@
+import os
 import pyaudio
 import wave
 import threading
@@ -16,24 +17,35 @@ class AudioRecorder:
         self.frames = []
         self._is_recording = False
         self._thread = None
+        self._source_name = os.getenv("TELEMOST_AUDIO_SOURCE_NAME", "virtual_sink.monitor").strip()
         self._device_index = self._find_virtual_device()
 
     def _log(self, message: str) -> None:
         print(f"{self.log_prefix} {message}")
  
     def _find_virtual_device(self):
-        """Ищет устройство virtual_sink.monitor для записи системного звука."""
-        target = "virtual_sink.monitor"
+        """Find the configured PulseAudio monitor source for recording system audio."""
+        target = self._source_name or "virtual_sink.monitor"
         for i in range(self.audio.get_device_count()):
             info = self.audio.get_device_info_by_index(i)
-            if info['maxInputChannels'] > 0 and target in info['name']:
-                self._log(f"Found {target} at index {i}")
+            name = str(info.get('name', ''))
+            if info['maxInputChannels'] > 0 and target in name:
+                self._log(f"Found {target} at index {i}: {name}")
                 return i
-        # Если не найдено, используем pulse (микрофон) как fallback
+
+        self._log(f"Configured audio source was not found: {target}")
         for i in range(self.audio.get_device_count()):
             info = self.audio.get_device_info_by_index(i)
-            if info['maxInputChannels'] > 0 and 'pulse' in info['name']:
-                self._log(f"Using pulse as fallback at index {i}")
+            name = str(info.get('name', ''))
+            if info['maxInputChannels'] > 0:
+                self._log(f"Available input device {i}: {name}")
+
+        # Fallback keeps old behavior for manual runs where only the generic pulse device is visible.
+        for i in range(self.audio.get_device_count()):
+            info = self.audio.get_device_info_by_index(i)
+            name = str(info.get('name', ''))
+            if info['maxInputChannels'] > 0 and 'pulse' in name:
+                self._log(f"Using pulse as fallback at index {i}: {name}")
                 return i
         return None
  

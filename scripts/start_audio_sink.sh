@@ -16,18 +16,30 @@ if ! pactl info >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! pactl list short sinks | awk '{print $2}' | grep -qx 'virtual_sink'; then
-  pactl load-module module-null-sink sink_name=virtual_sink sink_properties=device.description=Virtual_Sink >/dev/null
-fi
+ensure_sink() {
+  local name="$1"
+  local description="$2"
+  if ! pactl list short sinks | awk '{print $2}' | grep -qx "$name"; then
+    pactl load-module module-null-sink sink_name="$name" sink_properties="device.description=${description}" >/dev/null
+  fi
+}
+
+ensure_sink virtual_sink Virtual_Sink
+ensure_sink virtual_sink_bot_1 Virtual_Sink_Bot_1
+ensure_sink virtual_sink_bot_2 Virtual_Sink_Bot_2
+ensure_sink virtual_sink_bot_3 Virtual_Sink_Bot_3
 
 pactl set-default-sink virtual_sink >/dev/null 2>&1 || true
 pactl set-default-source virtual_sink.monitor >/dev/null 2>&1 || true
 
-echo "--- telemost audio sink ---"
+echo "--- telemost audio sinks ---"
 pactl list short sinks | grep 'virtual_sink' || true
-pactl list short sources | grep 'virtual_sink.monitor' || true
+echo "--- telemost audio sources ---"
+pactl list short sources | grep 'virtual_sink' || true
 
-if ! pactl list short sources | awk '{print $2}' | grep -qx 'virtual_sink.monitor'; then
-  echo "virtual_sink.monitor was not found" >&2
-  exit 1
-fi
+for source in virtual_sink.monitor virtual_sink_bot_1.monitor virtual_sink_bot_2.monitor virtual_sink_bot_3.monitor; do
+  if ! pactl list short sources | awk '{print $2}' | grep -qx "$source"; then
+    echo "$source was not found" >&2
+    exit 1
+  fi
+done

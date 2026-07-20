@@ -10,7 +10,6 @@ services:
     environment:
       PULSE_SERVER: unix:/run/user/1002/pulse/native
       PULSE_SINK: virtual_sink_bot_1
-      PULSE_SOURCE: virtual_sink_bot_1.monitor
       TELEMOST_AUDIO_SOURCE_NAME: virtual_sink_bot_1.monitor
       TELEMOST_AUTH_STATE_PATH: data/auth/yandex-session.json
       TELEMOST_AUTH_COOKIES_PATH: data/auth/cookies.json
@@ -50,7 +49,6 @@ services:
     environment:
       PULSE_SERVER: unix:/run/user/1002/pulse/native
       PULSE_SINK: virtual_sink_bot_2
-      PULSE_SOURCE: virtual_sink_bot_2.monitor
       TELEMOST_AUDIO_SOURCE_NAME: virtual_sink_bot_2.monitor
       TELEMOST_AUTH_STATE_PATH: data/auth/yandex-session.json
       TELEMOST_AUTH_COOKIES_PATH: data/auth/cookies.json
@@ -90,7 +88,6 @@ services:
     environment:
       PULSE_SERVER: unix:/run/user/1002/pulse/native
       PULSE_SINK: virtual_sink_bot_3
-      PULSE_SOURCE: virtual_sink_bot_3.monitor
       TELEMOST_AUDIO_SOURCE_NAME: virtual_sink_bot_3.monitor
       TELEMOST_AUTH_STATE_PATH: data/auth/yandex-session.json
       TELEMOST_AUTH_COOKIES_PATH: data/auth/cookies.json

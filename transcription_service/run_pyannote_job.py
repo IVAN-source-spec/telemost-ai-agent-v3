@@ -2,8 +2,10 @@ import argparse
 import collections
 import json
 import os
+import socket
 import statistics
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -84,9 +86,25 @@ def request_json(
     if body is not None:
         headers["Content-Type"] = "application/json"
 
-    req = urllib.request.Request(url, data=body, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    attempts = max(1, int(os.getenv("PYANNOTE_HTTP_REQUEST_MAX_ATTEMPTS", "5")))
+    retry_delay = float(os.getenv("PYANNOTE_HTTP_RETRY_DELAY_SECONDS", "15"))
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        req = urllib.request.Request(url, data=body, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except (TimeoutError, socket.timeout, urllib.error.URLError) as error:
+            last_error = error
+            if attempt >= attempts:
+                raise
+            print(
+                f"HTTP request failed, retrying {attempt + 1}/{attempts}: "
+                f"{type(error).__name__}: {error}"
+            )
+            time.sleep(retry_delay * attempt)
+
+    raise RuntimeError(f"HTTP request failed without response: {last_error}")
 
 
 def upload_file(audio_path: Path, signed_url: str, *, timeout_seconds: int = int(os.getenv("PYANNOTE_UPLOAD_TIMEOUT_SECONDS", "3600"))) -> None:
@@ -261,11 +279,27 @@ def save_outputs(audio_path: Path, job_id: str, job: dict, request_payload: dict
     summary = build_summary(job, request_payload)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8-sig")
 
-    if transcript:
-        txt_path.write_text(transcript, encoding="utf-8-sig")
-        return json_path, txt_path, summary_path
+    if not transcript:
+        output = job.get("output", {}) or {}
+        warning = output.get("warning") or job.get("warning")
+        lines = [
+            "Транскрипция не содержит распознанных фрагментов.",
+            "Pyannote завершил задачу, но не вернул turn-level transcription.",
+        ]
+        if warning:
+            lines.append(f"Предупреждение Pyannote: {warning}")
+        lines.extend(
+            [
+                f"diarization: {len(output.get('diarization') or [])}",
+                f"exclusiveDiarization: {len(output.get('exclusiveDiarization') or [])}",
+                f"wordLevelTranscription: {len(output.get('wordLevelTranscription') or [])}",
+                f"turnLevelTranscription: {len(output.get('turnLevelTranscription') or [])}",
+            ]
+        )
+        transcript = "\n".join(lines) + "\n"
 
-    return json_path, None, summary_path
+    txt_path.write_text(transcript, encoding="utf-8-sig")
+    return json_path, txt_path, summary_path
 
 
 def load_job_json(job_json_path: Path) -> dict:
@@ -379,10 +413,7 @@ def main() -> int:
             json_path, txt_path, summary_path = save_outputs(audio_path, job_id, job, request_payload)
             print("Saved JSON result.")
             print("Saved summary result.")
-            if txt_path:
-                print("Saved text transcript.")
-            else:
-                print("No turn-level transcript returned, only JSON was saved.")
+            print("Saved text transcript.")
             return 0
 
         time.sleep(args.poll_seconds)
