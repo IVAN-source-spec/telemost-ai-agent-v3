@@ -13,7 +13,6 @@ from core.constants import USER_AGENT, VIEWPORT, CHROMIUM_ARGS
 from core.storage.meeting_storage import MeetingArtifacts, get_meeting_storage
 from core.browser_bot.chat_commands import ChatCommandsModule
 from core.browser_bot.participants_snapshot import ParticipantsSnapshotModule
-from core.browser_bot.agenda_tracker import AgendaTracker
 
 DEFAULT_STORAGE_STATE_PATH = "data/auth/yandex-session.json"
 DEFAULT_COOKIES_PATH = "data/auth/cookies.json"
@@ -40,8 +39,6 @@ class TelemostBot:
         self.recorder = None
         self.session_id = None
         self.meeting_title = None
-        self.agenda_text = None
-        self.agenda_tracker = None
         self.meeting_artifacts: MeetingArtifacts | None = None
         self.meeting_started_at = None
         self.meeting_ended_at = None
@@ -393,7 +390,6 @@ class TelemostBot:
             self._print("[Bot] Meeting page not detected, but continuing")
 
         self._start_meeting_timer()
-        self._start_agenda_tracker_if_enabled()
         await self._push_timer_camera_state()
         await self._mute_microphone_js()
 
@@ -401,36 +397,6 @@ class TelemostBot:
         await self._run_chat_commands_probe_if_enabled()
         await self._start_participants_snapshot_if_enabled()
 
-
-
-    def _start_agenda_tracker_if_enabled(self) -> None:
-        if not self.agenda_text or self.meeting_started_at is None:
-            self.agenda_tracker = None
-            return
-        try:
-            tracker = AgendaTracker(
-                raw_agenda=self.agenda_text,
-                meeting_dir=self._meeting_dir(),
-                meeting_started_at=self.meeting_started_at,
-                logger=self._print,
-                bot_id=self.bot_id,
-            )
-            if not tracker.enabled:
-                self._print("[Bot] Agenda was provided but no agenda items were parsed")
-                self.agenda_tracker = None
-                return
-            self.agenda_tracker = tracker
-            self.agenda_tracker.start()
-        except Exception as error:
-            self.agenda_tracker = None
-            self._print(f"[Bot] Agenda tracker start failed: {error}")
-
-    async def _handle_agenda_event(self, stage: str) -> dict | None:
-        if stage != "next_question" or self.agenda_tracker is None:
-            return {"status": "disabled"}
-        result = self.agenda_tracker.next_question()
-        await self._push_timer_camera_state()
-        return result
 
     def _participants_snapshot_self_name_markers(self) -> list[str]:
         return [self.display_name, "\u0412\u0435\u0440\u0442\u0435\u0440 \u0420\u043e\u0431\u043e\u0442", "Telemost Bot"]
@@ -491,8 +457,6 @@ class TelemostBot:
                 logger=self._print,
                 bot_id=self.bot_id,
                 confidential_event_handler=self._handle_confidential_mode_event,
-                agenda_event_handler=self._handle_agenda_event,
-                agenda_enabled=self.agenda_tracker is not None and self.agenda_tracker.enabled,
             )
             await module.run_probe()
         except Exception as error:
@@ -532,8 +496,6 @@ class TelemostBot:
             "meetingTitle": "Telemost Bot",
             "startTimeMs": start_time_ms,
         }
-        if self.agenda_tracker is not None:
-            payload.update(self.agenda_tracker.overlay_state())
 
         try:
             has_compositor = await self.page.evaluate("typeof window.__COMPOSITOR__ !== 'undefined'")
@@ -935,8 +897,6 @@ class TelemostBot:
             self.participants_snapshot_module.stop()
         if self.confidential_participants_snapshot_module is not None:
             self.confidential_participants_snapshot_module.stop()
-        if self.agenda_tracker is not None:
-            self.agenda_tracker.finish()
 
         if self.page:
             await self.page.close()
@@ -952,7 +912,6 @@ class TelemostBot:
         """Основной цикл работы бота: вход, мониторинг, выход."""
         session_id = config.get("session_id", None)
         self.meeting_title = config.get("title")
-        self.agenda_text = config.get("agenda")
         await self.join(meeting_url, session_id)
 
         alone_seconds = 0

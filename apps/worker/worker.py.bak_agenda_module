@@ -15,7 +15,6 @@ async def process_task(task_data):
     bot_id = task_data.bot_id
     meeting_url = task_data.meeting_url
     title = getattr(task_data, "title", None)
-    agenda = getattr(task_data, "agenda", None)
     source = getattr(task_data, "source", None)
     external_event_id = getattr(task_data, "external_event_id", None)
     scheduled_start_at = getattr(task_data, "scheduled_start_at", None)
@@ -45,7 +44,6 @@ async def process_task(task_data):
             "reconnect_lost_checks": int(os.getenv("TELEMOST_RECONNECT_LOST_CHECKS", "2")),
             "session_id": session_id,
             "title": title,
-            "agenda": agenda,
             "source": source,
             "external_event_id": external_event_id,
             "scheduled_start_at": scheduled_start_at,
@@ -62,7 +60,6 @@ async def process_task(task_data):
             "meeting_dir": config.get("meeting_dir"),
             "audio_path": config.get("audio_path"),
             "source": source,
-            "agenda": agenda,
             "external_event_id": external_event_id,
             "scheduled_start_at": scheduled_start_at,
             "scheduled_end_at": scheduled_end_at,

@@ -152,8 +152,7 @@
       padding-top: 14px;
       border-top: 1px solid #e5e9ef;
     }
-    input,
-    textarea {
+    input {
       width: 100%;
       min-height: 38px;
       border: 1px solid #cbd3dc;
@@ -163,12 +162,7 @@
       background: #ffffff;
       color: #20242d;
     }
-    textarea {
-      min-height: 92px;
-      resize: vertical;
-    }
-    input:focus,
-    textarea:focus {
+    input:focus {
       outline: 2px solid #9bc8ff;
       outline-offset: 1px;
       border-color: #4b9cf3;
@@ -253,7 +247,6 @@
           <input name="title" type="text" placeholder="Название, необязательно">
           <button type="submit">Запустить</button>
         </div>
-        <textarea name="agenda" placeholder="&#1055;&#1086;&#1074;&#1077;&#1089;&#1090;&#1082;&#1072;, &#1085;&#1077;&#1086;&#1073;&#1103;&#1079;&#1072;&#1090;&#1077;&#1083;&#1100;&#1085;&#1086;: ###&#1055;&#1086;&#1074;&#1077;&#1089;&#1090;&#1082;&#1072;: #1. &#1055;&#1077;&#1088;&#1074;&#1099;&#1081; &#1074;&#1086;&#1087;&#1088;&#1086;&#1089; #2. &#1042;&#1090;&#1086;&#1088;&#1086;&#1081; &#1074;&#1086;&#1087;&#1088;&#1086;&#1089;###"></textarea>
         <div class="form-message" id="quick-start-message"></div>
       </form>
     </section>
@@ -302,7 +295,6 @@
             <input name="meeting_url" type="url" placeholder="Ссылка на встречу" required>
             <input name="title" type="text" placeholder="Название встречи, необязательно">
             <button type="submit">Запустить</button>
-            <textarea name="agenda" placeholder="&#1055;&#1086;&#1074;&#1077;&#1089;&#1090;&#1082;&#1072;, &#1085;&#1077;&#1086;&#1073;&#1103;&#1079;&#1072;&#1090;&#1077;&#1083;&#1100;&#1085;&#1086;: ###&#1055;&#1086;&#1074;&#1077;&#1089;&#1090;&#1082;&#1072;: #1. &#1055;&#1077;&#1088;&#1074;&#1099;&#1081; &#1074;&#1086;&#1087;&#1088;&#1086;&#1089; #2. &#1042;&#1090;&#1086;&#1088;&#1086;&#1081; &#1074;&#1086;&#1087;&#1088;&#1086;&#1089;###"></textarea>
             <div class="form-message" data-message-for="${bot.bot_id}"></div>
           </form>
         ` : "";
@@ -341,8 +333,7 @@
       const formData = new FormData(form);
       const payload = {
         meeting_url: String(formData.get("meeting_url") || "").trim(),
-        title: String(formData.get("title") || "").trim() || null,
-        agenda: String(formData.get("agenda") || "").trim() || null
+        title: String(formData.get("title") || "").trim() || null
       };
 
       button.disabled = true;
@@ -376,8 +367,7 @@
       const formData = new FormData(form);
       const payload = {
         meeting_url: String(formData.get("meeting_url") || "").trim(),
-        title: String(formData.get("title") || "").trim() || null,
-        agenda: String(formData.get("agenda") || "").trim() || null
+        title: String(formData.get("title") || "").trim() || null
       };
 
       button.disabled = true;

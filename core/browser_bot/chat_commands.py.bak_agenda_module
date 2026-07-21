@@ -7,7 +7,6 @@ from pathlib import Path
 
 class ChatCommandsModule:
     EXIT_BOT_COMMANDS = ("#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430",)
-    NEXT_AGENDA_COMMANDS = ("#\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u043e\u043f\u0440\u043e\u0441",)
     CONFIDENTIAL_NO_RECORDING_PREFIXES = (
         "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
         "#\u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
@@ -17,13 +16,11 @@ class ChatCommandsModule:
         "#\u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f",
     )
 
-    def __init__(self, page, logger=print, bot_id: str | None = None, confidential_event_handler=None, agenda_event_handler=None, agenda_enabled: bool = False):
+    def __init__(self, page, logger=print, bot_id: str | None = None, confidential_event_handler=None):
         self.page = page
         self.logger = logger
         self.bot_id = bot_id or "unknown"
         self.confidential_event_handler = confidential_event_handler
-        self.agenda_event_handler = agenda_event_handler
-        self.agenda_enabled = bool(agenda_enabled)
         self._seen_message_keys: set[str] = set()
         self._handled_command_keys: set[str] = set()
         self._monitor_task: asyncio.Task | None = None
@@ -100,16 +97,13 @@ class ChatCommandsModule:
             self.logger(f"[Bot] Chat startup message failed: {error}")
 
     def _startup_message_text(self) -> str:
-        command_lines = [
-            "\u0411\u043e\u0442 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d \u0438 \u0433\u043e\u0442\u043e\u0432 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u044b.",
-            "\u041a\u043e\u043c\u0430\u043d\u0434\u044b:",
-            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f \u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043e\u0441\u0442\u0430\u0432\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0438 \u0437\u0430\u043f\u0438\u0448\u0435\u0442 \u043a\u043e\u043d\u0444. \u0447\u0430\u0441\u0442\u044c",
-            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f \u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043e\u0441\u0442\u0430\u0432\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0438 \u0432\u044b\u0439\u0434\u0435\u0442",
-            "#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430 - \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442 \u0437\u0430\u043f\u0438\u0441\u044c \u0438 \u0432\u044b\u0439\u0434\u0435\u0442 \u0438\u0437 \u0432\u0441\u0442\u0440\u0435\u0447\u0438",
-        ]
-        if self.agenda_enabled:
-            command_lines.append("#\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u043e\u043f\u0440\u043e\u0441 - \u043f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0438\u0442 \u0442\u0430\u0439\u043c\u0435\u0440 \u043f\u043e\u0432\u0435\u0441\u0442\u043a\u0438")
-        default_message = "\n".join(command_lines)
+        default_message = (
+            "\u0411\u043e\u0442 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d \u0438 \u0433\u043e\u0442\u043e\u0432 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u044b.\n"
+            "\u041a\u043e\u043c\u0430\u043d\u0434\u044b:\n"
+            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f \u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043e\u0441\u0442\u0430\u0432\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0438 \u0437\u0430\u043f\u0438\u0448\u0435\u0442 \u043a\u043e\u043d\u0444. \u0447\u0430\u0441\u0442\u044c\n"
+            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f \u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043e\u0441\u0442\u0430\u0432\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0438 \u0432\u044b\u0439\u0434\u0435\u0442\n"
+            "#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430 - \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442 \u0437\u0430\u043f\u0438\u0441\u044c \u0438 \u0432\u044b\u0439\u0434\u0435\u0442 \u0438\u0437 \u0432\u0441\u0442\u0440\u0435\u0447\u0438"
+        )
         return os.getenv("TELEMOST_CHAT_COMMANDS_STARTUP_MESSAGE", default_message).strip()
 
     async def _send_service_message(self, message: str) -> str:
@@ -482,15 +476,6 @@ class ChatCommandsModule:
                 await self._notify_confidential_event("exit_requested", "", "exit")
                 continue
 
-            if self.agenda_enabled and self._is_next_agenda_command(text):
-                self._handled_command_keys.add(key)
-                agenda_result = await self._notify_agenda_event("next_question")
-                response = self._agenda_response(agenda_result)
-                if response:
-                    result = await self._send_service_message(response)
-                    self.logger(f"[Bot] Agenda command response result: {result}")
-                continue
-
             command = self._parse_confidential_command(text)
             if not command:
                 continue
@@ -506,36 +491,6 @@ class ChatCommandsModule:
             participants_result = await self._open_participants_panel_after_confidential_command(participants)
             self.logger(f"[Bot] Confidential participants panel result: {participants_result}")
             await self._notify_confidential_event("after_participant_cleanup", participants, mode)
-
-
-    def _is_next_agenda_command(self, text: str) -> bool:
-        normalized = self._normalize_message_text(text).lower()
-        return normalized in self.NEXT_AGENDA_COMMANDS
-
-    async def _notify_agenda_event(self, stage: str) -> dict | None:
-        if self.agenda_event_handler is None:
-            return None
-        try:
-            result = self.agenda_event_handler(stage)
-            if hasattr(result, "__await__"):
-                result = await result
-            return result
-        except Exception as error:
-            self.logger(f"[Bot] Agenda event handler failed ({stage}): {error}")
-            return {"status": "failed", "message": str(error)}
-
-    def _agenda_response(self, result: dict | None) -> str:
-        if not result:
-            return ""
-        status = result.get("status")
-        if status == "switched":
-            return (
-                "\u041f\u0435\u0440\u0435\u0445\u043e\u0436\u0443 \u043a \u0432\u043e\u043f\u0440\u043e\u0441\u0443 "
-                f"{result.get('index')}/{result.get('total')}: {result.get('title')}"
-            )
-        if status == "completed":
-            return "\u041f\u043e\u0432\u0435\u0441\u0442\u043a\u0430 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0430."
-        return ""
 
     async def _notify_confidential_event(self, stage: str, participants: str, mode: str = "recording") -> None:
         if self.confidential_event_handler is None:
