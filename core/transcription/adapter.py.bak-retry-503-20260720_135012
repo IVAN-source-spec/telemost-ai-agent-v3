@@ -100,11 +100,6 @@ class TranscriptionAdapter:
             "Temporary failure",
             "Connection reset",
             "Remote end closed connection",
-            "HTTP Error 429",
-            "HTTP Error 503",
-            "Slow Down",
-            "ServiceUnavailable",
-            "Service Unavailable",
         )
         return any(marker.lower() in stderr.lower() for marker in retryable_markers)
  
@@ -158,9 +153,6 @@ class TranscriptionAdapter:
  
         # Запускаем процесс и ЖДЁМ его завершения (только для получения job_id)
         # Используем subprocess.run, а не Popen, чтобы дождаться завершения
-        # The Pyannote job may legitimately run for hours, but the local submit
-        # process should only cover upload + polling until result files are written.
-        submit_process_timeout = max(60, self._env_int("PYANNOTE_SUBMIT_PROCESS_TIMEOUT_SECONDS", 2400))
         max_attempts = int(os.getenv("PYANNOTE_SUBMIT_MAX_ATTEMPTS", "3"))
         result = None
         try:
@@ -173,7 +165,7 @@ class TranscriptionAdapter:
                         capture_output=True,
                         text=True,
                         env=env,
-                        timeout=submit_process_timeout
+                        timeout=timeout_seconds
                     )
                 except subprocess.TimeoutExpired as e:
                     stderr = str(e)

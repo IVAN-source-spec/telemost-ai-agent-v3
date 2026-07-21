@@ -1,0 +1,175 @@
+import asyncio
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+class ParticipantsSnapshotModule:
+    def __init__(
+        self,
+        page,
+        meeting_dir: Path,
+        meeting_started_at: datetime,
+        logger=print,
+        bot_id: str | None = None,
+        self_name_markers: list[str] | None = None,
+    ):
+        self.page = page
+        self.meeting_dir = Path(meeting_dir)
+        self.meeting_started_at = meeting_started_at
+        self.logger = logger
+        self.bot_id = bot_id or "unknown"
+        self.self_name_markers = [marker for marker in (self_name_markers or []) if marker]
+        self.output_path = self.meeting_dir / "participants_snapshot.json"
+        self._task: asyncio.Task | None = None
+
+    def start_initial_snapshot(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
+        delay_seconds = int(os.getenv("TELEMOST_PARTICIPANTS_INITIAL_SNAPSHOT_DELAY_SECONDS", "30"))
+        self._task = asyncio.create_task(self._run_initial_snapshot(delay_seconds))
+        self.logger(f"[Bot] Participants snapshot scheduled in {delay_seconds}s: {self.output_path}")
+
+    async def _run_initial_snapshot(self, delay_seconds: int) -> None:
+        try:
+            await self.page.wait_for_timeout(max(0, delay_seconds) * 1000)
+            if self.page.is_closed():
+                return
+            snapshot = await self.capture_snapshot(reason="initial")
+            self._append_snapshot(snapshot)
+            self.logger(
+                "[Bot] Participants snapshot saved: "
+                f"{len(snapshot['participants'])} participant(s), {self.output_path}"
+            )
+        except Exception as error:
+            self.logger(f"[Bot] Participants snapshot failed: {error}")
+
+    async def capture_snapshot(self, reason: str) -> dict:
+        await self._click_participants_button()
+        await self.page.wait_for_timeout(1000)
+        participants = await self._read_participant_names()
+        await self._click_chat_button()
+        elapsed_seconds = self._elapsed_seconds()
+        return {
+            "meeting_time_seconds": elapsed_seconds,
+            "meeting_time": self._format_duration(elapsed_seconds),
+            "participants": participants,
+        }
+
+    async def _read_participant_names(self) -> list[str]:
+        raw_names = await self.page.evaluate("""(selfMarkers) => {
+            const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+            const isVisible = (element) => {
+                if (!element) return false;
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    Number(style.opacity || '1') !== 0;
+            };
+            const normalize = (value) => clean(value).toLowerCase();
+            const selfSet = new Set((selfMarkers || []).map(normalize).filter(Boolean));
+            const botWords = ['telemost bot', 'recording bot', '\u0432\u0435\u0440\u0442\u0435\u0440 \u0440\u043e\u0431\u043e\u0442'];
+
+            const rows = Array.from(document.querySelectorAll('div[class*="Participant_"]')).filter(isVisible);
+            const names = [];
+            for (const row of rows) {
+                let name = '';
+                const display = row.querySelector('span[class*="DisplayName_"]');
+                if (display) {
+                    name = clean(display.innerText || display.textContent);
+                }
+                if (!name) {
+                    const rowText = clean(row.innerText || row.textContent);
+                    name = rowText
+                        .replace(/\b\u043e\u0440\u0433\u0430\u043d\u0438\u0437\u0430\u0442\u043e\u0440\b/gi, '')
+                        .replace(/\bco-?host\b/gi, '')
+                        .replace(/\bhost\b/gi, '')
+                        .trim();
+                }
+                const normalized = normalize(name);
+                if (!normalized) continue;
+                if (selfSet.has(normalized)) continue;
+                if (botWords.some((word) => normalized.includes(word))) continue;
+                names.push(name);
+            }
+
+            return names.filter((name, index, items) => {
+                const normalized = normalize(name);
+                return items.findIndex((other) => normalize(other) === normalized) === index;
+            });
+        }""", self.self_name_markers)
+        return [str(name).strip() for name in raw_names if str(name).strip()]
+
+    async def _click_participants_button(self) -> str:
+        return await self.page.evaluate("""() => {
+            const isVisibleAndEnabled = (element) => {
+                if (!element) return false;
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    Number(style.opacity || '1') !== 0 &&
+                    !element.disabled;
+            };
+            const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+            const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+            const target = buttons.find((button) => {
+                if (!isVisibleAndEnabled(button)) return false;
+                const text = clean(button.innerText || button.textContent).toLowerCase();
+                const aria = clean(button.getAttribute('aria-label') || '').toLowerCase();
+                const title = clean(button.getAttribute('title') || '').toLowerCase();
+                return text.startsWith('\u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438') || aria.includes('\u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a') || title.includes('\u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a') || text.includes('participants');
+            });
+            if (!target) return 'participants button not found';
+            target.click();
+            return `clicked participants: ${clean(target.innerText || target.textContent || target.getAttribute('aria-label') || target.getAttribute('title') || 'unknown')}`;
+        }""")
+
+    async def _click_chat_button(self) -> str:
+        await self.page.wait_for_timeout(300)
+        return await self.page.evaluate("""() => {
+            const isVisibleAndEnabled = (element) => {
+                if (!element) return false;
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    Number(style.opacity || '1') !== 0 &&
+                    !element.disabled;
+            };
+            const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+            const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+            const target = buttons.find((button) => {
+                if (!isVisibleAndEnabled(button)) return false;
+                const text = clean(button.innerText || button.textContent).toLowerCase();
+                const aria = clean(button.getAttribute('aria-label') || '').toLowerCase();
+                const title = clean(button.getAttribute('title') || '').toLowerCase();
+                return text === '\u0447\u0430\u0442' || aria === '\u0447\u0430\u0442' || aria === '\u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0447\u0430\u0442' || title === '\u0447\u0430\u0442' || title === '\u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0447\u0430\u0442';
+            });
+            if (!target) return 'chat button not found';
+            target.click();
+            return `clicked chat: ${clean(target.innerText || target.textContent || target.getAttribute('aria-label') || target.getAttribute('title') || 'unknown')}`;
+        }""")
+
+    def _append_snapshot(self, snapshot: dict) -> None:
+        self.meeting_dir.mkdir(parents=True, exist_ok=True)
+        self.output_path.write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _elapsed_seconds(self) -> int:
+        return max(0, int((datetime.now(timezone.utc) - self.meeting_started_at).total_seconds()))
+
+    @staticmethod
+    def _format_duration(total_seconds: int) -> str:
+        safe_seconds = max(0, int(total_seconds))
+        hours = safe_seconds // 3600
+        minutes = (safe_seconds % 3600) // 60
+        seconds = safe_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"

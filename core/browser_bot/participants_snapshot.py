@@ -1,0 +1,379 @@
+import asyncio
+import json
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+class ParticipantsSnapshotModule:
+    def __init__(
+        self,
+        page,
+        meeting_dir: Path,
+        meeting_started_at: datetime,
+        logger=print,
+        bot_id: str | None = None,
+        self_name_markers: list[str] | None = None,
+    ):
+        self.page = page
+        self.meeting_dir = Path(meeting_dir)
+        self.meeting_started_at = meeting_started_at
+        self.logger = logger
+        self.bot_id = bot_id or "unknown"
+        self.self_name_markers = [marker for marker in (self_name_markers or []) if marker]
+        self.output_path = self.meeting_dir / "participants_snapshot.json"
+        self._task: asyncio.Task | None = None
+        self._stop_requested = False
+        self._last_participants_count: int | None = None
+        self._last_observed_count: int | None = None
+        self._pending_change_task: asyncio.Task | None = None
+
+    def start_initial_snapshot(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
+        self._stop_requested = False
+        delay_seconds = int(os.getenv("TELEMOST_PARTICIPANTS_INITIAL_SNAPSHOT_DELAY_SECONDS", "30"))
+        self._task = asyncio.create_task(self._run_snapshot_monitor(delay_seconds))
+        self.logger(f"[Bot] Participants snapshot scheduled in {delay_seconds}s: {self.output_path}")
+
+    def stop(self) -> None:
+        self._stop_requested = True
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+        if self._pending_change_task is not None and not self._pending_change_task.done():
+            self._pending_change_task.cancel()
+
+    def append_known_participants_snapshot(self, participants: list[str]) -> None:
+        cleaned = []
+        seen = set()
+        for participant in participants:
+            name = " ".join(str(participant).split()).strip()
+            key = name.lower()
+            if not name or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(name)
+        snapshot = {
+            "meeting_time_seconds": self._elapsed_seconds(),
+            "meeting_time": self._format_duration(self._elapsed_seconds()),
+            "participants": cleaned,
+        }
+        self._append_snapshot(snapshot)
+        self._last_participants_count = len(cleaned)
+        self._last_observed_count = len(cleaned)
+        self.logger(
+            "[Bot] Participants snapshot bootstrapped: "
+            f"{len(cleaned)} participant(s), {self.output_path}"
+        )
+
+    async def _run_snapshot_monitor(self, initial_delay_seconds: int) -> None:
+        try:
+            await self.page.wait_for_timeout(max(0, initial_delay_seconds) * 1000)
+            if self._stop_requested or self.page.is_closed():
+                return
+
+            snapshot = await self.capture_snapshot(reason="initial")
+            if not self._snapshot_has_expected_participants(snapshot):
+                self.logger(
+                    "[Bot] Participants snapshot skipped: "
+                    f"expected {self._last_observed_count}, got {len(snapshot['participants'])}"
+                )
+                return
+            self._append_snapshot(snapshot)
+            self._last_participants_count = len(snapshot["participants"])
+            self.logger(
+                "[Bot] Participants snapshot saved: "
+                f"{self._last_participants_count} participant(s), {self.output_path}"
+            )
+
+        except asyncio.CancelledError:
+            return
+        except Exception as error:
+            self.logger(f"[Bot] Participants snapshot failed: {error}")
+
+    def observe_participants_count(self, current_count: int) -> None:
+        self._last_observed_count = max(0, int(current_count))
+        if self._stop_requested:
+            return
+        if self._pending_change_task is not None and not self._pending_change_task.done():
+            return
+
+        stable_delay_seconds = int(os.getenv("TELEMOST_PARTICIPANTS_SNAPSHOT_CHANGE_DELAY_SECONDS", "10"))
+        if self._last_participants_count is None:
+            if self._last_observed_count <= 0:
+                return
+            self.logger(
+                "[Bot] Participants snapshot baseline missing: "
+                f"expected {self._last_observed_count}; snapshot in {stable_delay_seconds}s"
+            )
+            self._pending_change_task = asyncio.create_task(
+                self._capture_after_count_change(stable_delay_seconds)
+            )
+            return
+
+        if self._last_observed_count == self._last_participants_count:
+            return
+
+        self.logger(
+            "[Bot] Participants count changed: "
+            f"{self._last_participants_count} -> {self._last_observed_count}; snapshot in {stable_delay_seconds}s"
+        )
+        self._pending_change_task = asyncio.create_task(
+            self._capture_after_count_change(stable_delay_seconds)
+        )
+
+    async def _capture_after_count_change(self, stable_delay_seconds: int) -> None:
+        try:
+            await self.page.wait_for_timeout(max(0, stable_delay_seconds) * 1000)
+            if self._stop_requested or self.page.is_closed():
+                return
+            snapshot = await self.capture_snapshot(reason="count_changed")
+            if not self._snapshot_has_expected_participants(snapshot):
+                self.logger(
+                    "[Bot] Participants changed snapshot skipped: "
+                    f"expected {self._last_observed_count}, got {len(snapshot['participants'])}"
+                )
+                self._last_participants_count = self._last_observed_count
+                return
+            self._append_snapshot(snapshot)
+            self._last_participants_count = len(snapshot["participants"])
+            self.logger(
+                "[Bot] Participants snapshot saved after count change: "
+                f"{self._last_participants_count} participant(s), {self.output_path}"
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as error:
+            self.logger(f"[Bot] Participants changed snapshot failed: {error}")
+
+    async def _monitor_participants_count_changes(self) -> None:
+        interval_seconds = int(os.getenv("TELEMOST_PARTICIPANTS_SNAPSHOT_MONITOR_INTERVAL_SECONDS", "5"))
+        stable_delay_seconds = int(os.getenv("TELEMOST_PARTICIPANTS_SNAPSHOT_CHANGE_DELAY_SECONDS", "10"))
+
+        while not self._stop_requested:
+            if self.page.is_closed():
+                return
+            await self.page.wait_for_timeout(max(1, interval_seconds) * 1000)
+            if self._stop_requested or self.page.is_closed():
+                return
+
+            current_count = await self._read_participants_button_count()
+            if current_count is None or self._last_participants_count is None:
+                continue
+            if current_count == self._last_participants_count:
+                continue
+
+            self.logger(
+                "[Bot] Participants count changed: "
+                f"{self._last_participants_count} -> {self._last_observed_count}; snapshot in {stable_delay_seconds}s"
+            )
+            await self.page.wait_for_timeout(max(0, stable_delay_seconds) * 1000)
+            if self._stop_requested or self.page.is_closed():
+                return
+
+            snapshot = await self.capture_snapshot(reason="count_changed")
+            self._append_snapshot(snapshot)
+            self._last_participants_count = len(snapshot["participants"])
+            self.logger(
+                "[Bot] Participants snapshot saved after count change: "
+                f"{self._last_participants_count} participant(s), {self.output_path}"
+            )
+
+    async def capture_snapshot(self, reason: str) -> dict:
+        await self._click_participants_button()
+        participants = await self._read_participant_names_until_expected()
+        await self._click_chat_button()
+        elapsed_seconds = self._elapsed_seconds()
+        return {
+            "meeting_time_seconds": elapsed_seconds,
+            "meeting_time": self._format_duration(elapsed_seconds),
+            "participants": participants,
+        }
+
+    def _snapshot_has_expected_participants(self, snapshot: dict) -> bool:
+        expected = self._last_observed_count
+        if expected is None or expected <= 0:
+            return True
+        return len(snapshot.get("participants") or []) >= expected
+
+    async def _read_participant_names_until_expected(self) -> list[str]:
+        expected = self._last_observed_count
+        timeout_ms = int(os.getenv("TELEMOST_PARTICIPANTS_SNAPSHOT_NAMES_TIMEOUT_MS", "7000"))
+        deadline = datetime.now(timezone.utc).timestamp() + max(1000, timeout_ms) / 1000
+        best_names: list[str] = []
+
+        while datetime.now(timezone.utc).timestamp() < deadline:
+            await self.page.wait_for_timeout(500)
+            names = await self._read_participant_names()
+            if len(names) > len(best_names):
+                best_names = names
+            if expected is None or expected <= 0 or len(names) >= expected:
+                return names
+
+        return best_names
+
+    async def _read_participants_button_count(self) -> int | None:
+        result = await self.page.evaluate("""() => {
+            const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+            const isVisible = (element) => {
+                if (!element) return false;
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    Number(style.opacity || '1') !== 0;
+            };
+            const buttons = Array.from(document.querySelectorAll('button, [role="button"]')).filter(isVisible);
+            for (const button of buttons) {
+                const text = clean(button.innerText || button.textContent);
+                const aria = clean(button.getAttribute('aria-label') || '');
+                const title = clean(button.getAttribute('title') || '');
+                const combined = `${text} ${aria} ${title}`;
+                if (!combined.toLowerCase().includes('participants') &&
+                    !combined.toLowerCase().includes('\u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a')) {
+                    continue;
+                }
+                const match = combined.match(/(?:\u0423\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438|\u0423\u0447\u0430\u0441\u0442\u043d\u0438\u043a|Participants|Participant)\s*[:.]?\s*(\d+)/i) ||
+                    combined.match(/\b(\d{1,3})\b/);
+                if (!match) continue;
+                const total = parseInt(match[1], 10);
+                if (!Number.isFinite(total)) continue;
+                return Math.max(0, total - 1);
+            }
+            return null;
+        }""")
+        if result is None:
+            return None
+        try:
+            return int(result)
+        except (TypeError, ValueError):
+            return None
+
+    async def _read_participant_names(self) -> list[str]:
+        raw_names = await self.page.evaluate("""(selfMarkers) => {
+            const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+            const isVisible = (element) => {
+                if (!element) return false;
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    Number(style.opacity || '1') !== 0;
+            };
+            const normalize = (value) => clean(value).toLowerCase();
+            const selfSet = new Set((selfMarkers || []).map(normalize).filter(Boolean));
+            const botWords = ['telemost bot', 'recording bot', '\u0432\u0435\u0440\u0442\u0435\u0440 \u0440\u043e\u0431\u043e\u0442'];
+
+            const rows = Array.from(document.querySelectorAll('div[class*="Participant_"]')).filter(isVisible);
+            const names = [];
+            for (const row of rows) {
+                let name = '';
+                const display = row.querySelector('span[class*="DisplayName_"]');
+                if (display) {
+                    name = clean(display.innerText || display.textContent);
+                }
+                if (!name) {
+                    const rowText = clean(row.innerText || row.textContent);
+                    name = rowText
+                        .replace(/\b\u043e\u0440\u0433\u0430\u043d\u0438\u0437\u0430\u0442\u043e\u0440\b/gi, '')
+                        .replace(/\bco-?host\b/gi, '')
+                        .replace(/\bhost\b/gi, '')
+                        .trim();
+                }
+                const normalized = normalize(name);
+                if (!normalized) continue;
+                if (selfSet.has(normalized)) continue;
+                if (botWords.some((word) => normalized.includes(word))) continue;
+                names.push(name);
+            }
+
+            return names.filter((name, index, items) => {
+                const normalized = normalize(name);
+                return items.findIndex((other) => normalize(other) === normalized) === index;
+            });
+        }""", self.self_name_markers)
+        return [str(name).strip() for name in raw_names if str(name).strip()]
+
+    async def _click_participants_button(self) -> str:
+        return await self.page.evaluate("""() => {
+            const isVisibleAndEnabled = (element) => {
+                if (!element) return false;
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    Number(style.opacity || '1') !== 0 &&
+                    !element.disabled;
+            };
+            const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+            const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+            const target = buttons.find((button) => {
+                if (!isVisibleAndEnabled(button)) return false;
+                const text = clean(button.innerText || button.textContent).toLowerCase();
+                const aria = clean(button.getAttribute('aria-label') || '').toLowerCase();
+                const title = clean(button.getAttribute('title') || '').toLowerCase();
+                return text.startsWith('\u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438') || aria.includes('\u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a') || title.includes('\u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a') || text.includes('participants');
+            });
+            if (!target) return 'participants button not found';
+            target.click();
+            return `clicked participants: ${clean(target.innerText || target.textContent || target.getAttribute('aria-label') || target.getAttribute('title') || 'unknown')}`;
+        }""")
+
+    async def _click_chat_button(self) -> str:
+        await self.page.wait_for_timeout(300)
+        return await self.page.evaluate("""() => {
+            const isVisibleAndEnabled = (element) => {
+                if (!element) return false;
+                const rect = element.getBoundingClientRect();
+                const style = window.getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    Number(style.opacity || '1') !== 0 &&
+                    !element.disabled;
+            };
+            const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+            const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+            const target = buttons.find((button) => {
+                if (!isVisibleAndEnabled(button)) return false;
+                const text = clean(button.innerText || button.textContent).toLowerCase();
+                const aria = clean(button.getAttribute('aria-label') || '').toLowerCase();
+                const title = clean(button.getAttribute('title') || '').toLowerCase();
+                return text === '\u0447\u0430\u0442' || aria === '\u0447\u0430\u0442' || aria === '\u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0447\u0430\u0442' || title === '\u0447\u0430\u0442' || title === '\u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0447\u0430\u0442';
+            });
+            if (!target) return 'chat button not found';
+            target.click();
+            return `clicked chat: ${clean(target.innerText || target.textContent || target.getAttribute('aria-label') || target.getAttribute('title') || 'unknown')}`;
+        }""")
+
+    def _append_snapshot(self, snapshot: dict) -> None:
+        self.meeting_dir.mkdir(parents=True, exist_ok=True)
+        snapshots = []
+        if self.output_path.exists():
+            try:
+                existing = json.loads(self.output_path.read_text(encoding="utf-8"))
+                if isinstance(existing, list):
+                    snapshots = existing
+                elif isinstance(existing, dict):
+                    snapshots = [existing]
+            except Exception:
+                snapshots = []
+        snapshots.append(snapshot)
+        self.output_path.write_text(
+            json.dumps(snapshots, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _elapsed_seconds(self) -> int:
+        return max(0, int((datetime.now(timezone.utc) - self.meeting_started_at).total_seconds()))
+
+    @staticmethod
+    def _format_duration(total_seconds: int) -> str:
+        safe_seconds = max(0, int(total_seconds))
+        hours = safe_seconds // 3600
+        minutes = (safe_seconds % 3600) // 60
+        seconds = safe_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"

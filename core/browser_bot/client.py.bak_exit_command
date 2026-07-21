@@ -52,7 +52,6 @@ class TelemostBot:
         self.confidential_max_participants = 0
         self.confidential_recording_active = False
         self.confidential_no_recording_leave_requested = False
-        self.chat_exit_requested = False
         self.participants_snapshot_module = None
         self.confidential_participants_snapshot_module = None
         self.reconnect_events = []
@@ -435,10 +434,6 @@ class TelemostBot:
                 bot_id=self.bot_id,
                 self_name_markers=self._participants_snapshot_self_name_markers(),
             )
-            if self.confidential_participants:
-                self.confidential_participants_snapshot_module.append_known_participants_snapshot(
-                    self._split_confidential_participants(self.confidential_participants)
-                )
             self.confidential_participants_snapshot_module.start_initial_snapshot()
         except Exception as error:
             self._print(f"[Bot] Confidential participants snapshot start failed: {error}")
@@ -562,15 +557,12 @@ class TelemostBot:
 
     def _start_recording(self, audio_path: str | Path | None = None):
         """Start audio recording in a background thread."""
-        target_path = Path(audio_path) if audio_path else self._meeting_artifacts().audio_path
-        if self.recorder is not None:
-            self._print(f"[Bot] Audio recording already active: {self.recording_audio_path}")
-            return
-        self.recording_audio_path = target_path
-        self.recording_audio_path.parent.mkdir(parents=True, exist_ok=True)
-        self.recorder = AudioRecorder(log_prefix=f"[AudioRecorder:{self.bot_id}]")
-        self.recorder.start()
-        self._print(f"[Bot] Audio recording started: {self.recording_audio_path}")
+        if self.recorder is None:
+            self.recording_audio_path = Path(audio_path) if audio_path else self._meeting_artifacts().audio_path
+            self.recording_audio_path.parent.mkdir(parents=True, exist_ok=True)
+            self.recorder = AudioRecorder(log_prefix=f"[AudioRecorder:{self.bot_id}]")
+            self.recorder.start()
+            self._print(f"[Bot] Audio recording started: {self.recording_audio_path}")
 
     def _stop_recording(self):
         if self.recorder is None:
@@ -586,15 +578,9 @@ class TelemostBot:
         self.recorder.save(str(filename))
         self.recorder.close()
         self.recorder = None
-        self.recording_audio_path = None
         self._print(f"[Bot] Audio recording saved to {filename}")
 
     async def _handle_confidential_mode_event(self, stage: str, participants: str, mode: str = "recording") -> None:
-        if stage == "exit_requested":
-            self.chat_exit_requested = True
-            self._print("[Bot] Exit requested from chat command")
-            return
-
         if stage == "before_participant_cleanup":
             if self.confidential_started_at is not None or self.confidential_no_recording_leave_requested:
                 self._print("[Bot] Confidential mode is already initialized")
@@ -614,18 +600,6 @@ class TelemostBot:
                 return
             await self._start_confidential_recording(participants)
 
-    def _split_confidential_participants(self, participants: str) -> list[str]:
-        normalized = " ".join(str(participants or "").split()).strip()
-        if not normalized:
-            return []
-        for separator in [",", ";", "\n"]:
-            if separator in normalized:
-                return [part.strip() for part in normalized.split(separator) if part.strip()]
-        words = [word for word in normalized.split() if word]
-        if len(words) > 2 and len(words) % 2 == 0:
-            return [" ".join(words[index:index + 2]) for index in range(0, len(words), 2)]
-        return [normalized]
-
     async def _start_confidential_recording(self, participants: str) -> None:
         self.confidential_participants = participants
         self.confidential_started_at = datetime.now(timezone.utc)
@@ -637,13 +611,7 @@ class TelemostBot:
         self.confidential_dir.mkdir(parents=True, exist_ok=True)
         self._write_confidential_meeting_time()
         self._write_confidential_recording_status("recording")
-        confidential_audio_path = self.confidential_dir / "recording_meeting.wav"
-        if self.recorder is not None:
-            self._print("[Bot] Recorder was still active before confidential recording; stopping it first")
-            self._stop_recording()
-        self._start_recording(confidential_audio_path)
-        if self.recording_audio_path != confidential_audio_path:
-            raise RuntimeError(f"Confidential recorder did not start at expected path: {confidential_audio_path}")
+        self._start_recording(self.confidential_dir / "recording_meeting.wav")
         await self._start_confidential_participants_snapshot_if_enabled()
         self._print(f"[Bot] Confidential recording started: {self.confidential_dir}")
 
@@ -938,10 +906,6 @@ class TelemostBot:
                     attempt += 1
                     lost_checks = 0
                     continue
-
-            if self.chat_exit_requested:
-                self._print("[Bot] Leaving after chat exit command")
-                break
 
             if self.confidential_no_recording_leave_requested:
                 self._print("[Bot] Leaving after confidential no-recording command")

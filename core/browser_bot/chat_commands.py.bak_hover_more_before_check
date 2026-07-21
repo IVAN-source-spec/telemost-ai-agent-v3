@@ -739,23 +739,9 @@ class ChatCommandsModule:
                 if normalized_name in protected_names:
                     skipped.append(f"protected:{participant_name}")
                     continue
-
-                # Telemost renders the moderation "more" button lazily: it may appear
-                # only after the participant row is hovered. Check it after hover.
-                y = box["y"] + box["height"] / 2
-                await self.page.mouse.move(box["x"] + 18, y)
-                await self.page.wait_for_timeout(120)
-                await self.page.mouse.move(box["x"] + box["width"] - 20, y, steps=12)
-                await self.page.wait_for_timeout(350)
-
-                more_count = await row.locator('button[data-testid="more-popup-alt-button"]').count()
-                if more_count <= 0:
-                    more_count = await row.locator('button[aria-label="\u0415\u0449\u0451"], button[title="\u0415\u0449\u0451"]').count()
-                if more_count <= 0:
-                    skipped.append(f"no-more-after-hover:{participant_name}")
+                if await row.locator('button[data-testid="more-popup-alt-button"]').count() <= 0:
+                    skipped.append(f"no-more:{participant_name}")
                     continue
-
-                box = await row.bounding_box(timeout=500) or box
                 candidates.append((box["y"], row, participant_name, box))
             except Exception as error:
                 skipped.append(f"row-error:{error}")

@@ -98,10 +98,10 @@ class ChatCommandsModule:
 
     def _startup_message_text(self) -> str:
         default_message = (
-            "\u0411\u043e\u0442 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d \u0438 \u0433\u043e\u0442\u043e\u0432 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u044b.\n"
-            "\u041a\u043e\u043c\u0430\u043d\u0434\u044b:\n"
-            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f \u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043e\u0441\u0442\u0430\u0432\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0438 \u0437\u0430\u043f\u0438\u0448\u0435\u0442 \u043a\u043e\u043d\u0444. \u0447\u0430\u0441\u0442\u044c\n"
-            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f \u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043e\u0441\u0442\u0430\u0432\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0438 \u0432\u044b\u0439\u0434\u0435\u0442\n"
+            "\u0411\u043e\u0442 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d \u0438 \u0433\u043e\u0442\u043e\u0432 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u044b. "
+            "\u041a\u043e\u043c\u0430\u043d\u0434\u044b: "
+            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f \u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043e\u0441\u0442\u0430\u0432\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0438 \u0437\u0430\u043f\u0438\u0448\u0435\u0442 \u043a\u043e\u043d\u0444. \u0447\u0430\u0441\u0442\u044c; "
+            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f \u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043e\u0441\u0442\u0430\u0432\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0438 \u0432\u044b\u0439\u0434\u0435\u0442; "
             "#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430 - \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442 \u0437\u0430\u043f\u0438\u0441\u044c \u0438 \u0432\u044b\u0439\u0434\u0435\u0442 \u0438\u0437 \u0432\u0441\u0442\u0440\u0435\u0447\u0438"
         )
         return os.getenv("TELEMOST_CHAT_COMMANDS_STARTUP_MESSAGE", default_message).strip()
@@ -739,23 +739,9 @@ class ChatCommandsModule:
                 if normalized_name in protected_names:
                     skipped.append(f"protected:{participant_name}")
                     continue
-
-                # Telemost renders the moderation "more" button lazily: it may appear
-                # only after the participant row is hovered. Check it after hover.
-                y = box["y"] + box["height"] / 2
-                await self.page.mouse.move(box["x"] + 18, y)
-                await self.page.wait_for_timeout(120)
-                await self.page.mouse.move(box["x"] + box["width"] - 20, y, steps=12)
-                await self.page.wait_for_timeout(350)
-
-                more_count = await row.locator('button[data-testid="more-popup-alt-button"]').count()
-                if more_count <= 0:
-                    more_count = await row.locator('button[aria-label="\u0415\u0449\u0451"], button[title="\u0415\u0449\u0451"]').count()
-                if more_count <= 0:
-                    skipped.append(f"no-more-after-hover:{participant_name}")
+                if await row.locator('button[data-testid="more-popup-alt-button"]').count() <= 0:
+                    skipped.append(f"no-more:{participant_name}")
                     continue
-
-                box = await row.bounding_box(timeout=500) or box
                 candidates.append((box["y"], row, participant_name, box))
             except Exception as error:
                 skipped.append(f"row-error:{error}")

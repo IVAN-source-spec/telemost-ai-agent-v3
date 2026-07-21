@@ -6,11 +6,6 @@ from pathlib import Path
 
 
 class ChatCommandsModule:
-    EXIT_BOT_COMMANDS = ("#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430",)
-    CONFIDENTIAL_NO_RECORDING_PREFIXES = (
-        "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
-        "#\u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
-    )
     CONFIDENTIAL_PREFIXES = (
         "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f",
         "#\u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f",
@@ -98,11 +93,11 @@ class ChatCommandsModule:
 
     def _startup_message_text(self) -> str:
         default_message = (
-            "\u0411\u043e\u0442 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d \u0438 \u0433\u043e\u0442\u043e\u0432 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u044b.\n"
-            "\u041a\u043e\u043c\u0430\u043d\u0434\u044b:\n"
-            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f \u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043e\u0441\u0442\u0430\u0432\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0438 \u0437\u0430\u043f\u0438\u0448\u0435\u0442 \u043a\u043e\u043d\u0444. \u0447\u0430\u0441\u0442\u044c\n"
-            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f \u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043e\u0441\u0442\u0430\u0432\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0438 \u0432\u044b\u0439\u0434\u0435\u0442\n"
-            "#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430 - \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442 \u0437\u0430\u043f\u0438\u0441\u044c \u0438 \u0432\u044b\u0439\u0434\u0435\u0442 \u0438\u0437 \u0432\u0441\u0442\u0440\u0435\u0447\u0438"
+            "\u0411\u043e\u0442 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d \u0438 \u0433\u043e\u0442\u043e\u0432 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u044b. "
+            "\u0414\u043e\u0441\u0442\u0443\u043f\u043d\u044b\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b: "
+            "#help - \u0441\u043f\u0440\u0430\u0432\u043a\u0430; "
+            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f "
+            "\u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043a\u043e\u043d\u0444. \u0440\u0435\u0436\u0438\u043c"
         )
         return os.getenv("TELEMOST_CHAT_COMMANDS_STARTUP_MESSAGE", default_message).strip()
 
@@ -463,40 +458,28 @@ class ChatCommandsModule:
 
     async def _handle_new_messages(self, messages: list[dict]) -> None:
         for message in messages:
-            key = self._message_key(message)
-            if key in self._handled_command_keys:
-                continue
-
-            text = str(message.get("text", ""))
-            if self._is_exit_bot_command(text):
-                self._handled_command_keys.add(key)
-                response = self._exit_bot_response()
-                result = await self._send_service_message(response)
-                self.logger(f"[Bot] Exit command response result: {result}")
-                await self._notify_confidential_event("exit_requested", "", "exit")
-                continue
-
-            command = self._parse_confidential_command(text)
+            command = self._parse_confidential_command(str(message.get("text", "")))
             if not command:
                 continue
 
+            key = self._message_key(message)
+            if key in self._handled_command_keys:
+                continue
             self._handled_command_keys.add(key)
 
-            participants = command["participants"]
-            mode = command["mode"]
-            response = self._confidential_response(participants, mode)
+            response = self._confidential_response(command)
             result = await self._send_service_message(response)
             self.logger(f"[Bot] Confidential command response result: {result}")
-            await self._notify_confidential_event("before_participant_cleanup", participants, mode)
-            participants_result = await self._open_participants_panel_after_confidential_command(participants)
+            await self._notify_confidential_event("before_participant_cleanup", command)
+            participants_result = await self._open_participants_panel_after_confidential_command(command)
             self.logger(f"[Bot] Confidential participants panel result: {participants_result}")
-            await self._notify_confidential_event("after_participant_cleanup", participants, mode)
+            await self._notify_confidential_event("after_participant_cleanup", command)
 
-    async def _notify_confidential_event(self, stage: str, participants: str, mode: str = "recording") -> None:
+    async def _notify_confidential_event(self, stage: str, participants: str) -> None:
         if self.confidential_event_handler is None:
             return
         try:
-            result = self.confidential_event_handler(stage, participants, mode)
+            result = self.confidential_event_handler(stage, participants)
             if hasattr(result, "__await__"):
                 await result
         except Exception as error:
@@ -739,23 +722,9 @@ class ChatCommandsModule:
                 if normalized_name in protected_names:
                     skipped.append(f"protected:{participant_name}")
                     continue
-
-                # Telemost renders the moderation "more" button lazily: it may appear
-                # only after the participant row is hovered. Check it after hover.
-                y = box["y"] + box["height"] / 2
-                await self.page.mouse.move(box["x"] + 18, y)
-                await self.page.wait_for_timeout(120)
-                await self.page.mouse.move(box["x"] + box["width"] - 20, y, steps=12)
-                await self.page.wait_for_timeout(350)
-
-                more_count = await row.locator('button[data-testid="more-popup-alt-button"]').count()
-                if more_count <= 0:
-                    more_count = await row.locator('button[aria-label="\u0415\u0449\u0451"], button[title="\u0415\u0449\u0451"]').count()
-                if more_count <= 0:
-                    skipped.append(f"no-more-after-hover:{participant_name}")
+                if await row.locator('button[data-testid="more-popup-alt-button"]').count() <= 0:
+                    skipped.append(f"no-more:{participant_name}")
                     continue
-
-                box = await row.bounding_box(timeout=500) or box
                 candidates.append((box["y"], row, participant_name, box))
             except Exception as error:
                 skipped.append(f"row-error:{error}")
@@ -910,36 +879,16 @@ class ChatCommandsModule:
     def _normalize_participant_name(self, value: str) -> str:
         return " ".join(str(value).replace("?", "?").replace("?", "?").lower().split()).strip()
 
-    def _is_exit_bot_command(self, text: str) -> bool:
-        normalized = self._normalize_message_text(text).lower()
-        return normalized in self.EXIT_BOT_COMMANDS
-
-    def _exit_bot_response(self) -> str:
-        return "\u041f\u0440\u0438\u043d\u044f\u043b \u043a\u043e\u043c\u0430\u043d\u0434\u0443. \u0417\u0430\u0432\u0435\u0440\u0448\u0430\u044e \u0437\u0430\u043f\u0438\u0441\u044c \u0438 \u0432\u044b\u0445\u043e\u0436\u0443 \u0438\u0437 \u0432\u0441\u0442\u0440\u0435\u0447\u0438."
-
-    def _parse_confidential_command(self, text: str) -> dict | None:
+    def _parse_confidential_command(self, text: str) -> str | None:
         normalized = self._normalize_message_text(text).lower()
         original = self._normalize_message_text(text)
-
-        for prefix in self.CONFIDENTIAL_NO_RECORDING_PREFIXES:
-            if normalized.startswith(prefix):
-                participants = original[len(prefix):].strip()
-                return {"mode": "no_recording", "participants": participants} if participants else None
-
         for prefix in self.CONFIDENTIAL_PREFIXES:
             if normalized.startswith(prefix):
                 participants = original[len(prefix):].strip()
-                return {"mode": "recording", "participants": participants} if participants else None
+                return participants or None
         return None
 
-    def _confidential_response(self, participants: str, mode: str = "recording") -> str:
-        if mode == "no_recording":
-            return (
-                "\u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u044b\u0439 \u0440\u0435\u0436\u0438\u043c \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0432\u043a\u043b\u044e\u0447\u0435\u043d \u0434\u043b\u044f: "
-                f"{participants}. "
-                "\u0423\u0434\u0430\u043b\u044f\u044e \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0445 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432, \u043e\u0441\u0442\u0430\u043d\u0430\u0432\u043b\u0438\u0432\u0430\u044e \u0437\u0430\u043f\u0438\u0441\u044c \u0438 \u0432\u044b\u0445\u043e\u0436\u0443 \u0438\u0437 \u0432\u0441\u0442\u0440\u0435\u0447\u0438."
-            )
-
+    def _confidential_response(self, participants: str) -> str:
         return (
             "\u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u044b\u0439 "
             "\u0440\u0435\u0436\u0438\u043c \u0432\u043a\u043b\u044e\u0447\u0435\u043d \u0434\u043b\u044f: "

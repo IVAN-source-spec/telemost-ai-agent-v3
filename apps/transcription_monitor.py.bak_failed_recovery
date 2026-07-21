@@ -77,50 +77,6 @@ def requeue_stale_processing_without_job(status_file: Path, status_data: dict) -
     return data
 
 
-def retryable_failed_status(status_data: dict) -> bool:
-    status = str(status_data.get("status") or "").lower()
-    if status != "failed":
-        return False
-
-    attempts = int(status_data.get("submit_attempts") or 0)
-    max_attempts = int(os.getenv("TRANSCRIPTION_FAILED_MAX_ATTEMPTS", "5"))
-    if attempts >= max(1, max_attempts):
-        return False
-
-    error = str(status_data.get("error") or "")
-    if not error.strip():
-        return True
-
-    retry_markers = (
-        "TimeoutError",
-        "timed out",
-        "HTTP Error 429",
-        "HTTP Error 503",
-        "Slow Down",
-        "ServiceUnavailable",
-        "Service Unavailable",
-        "Connection reset",
-        "Remote end closed connection",
-        "Pyannote job failed:",
-    )
-    return any(marker in error for marker in retry_markers)
-
-
-def requeue_failed_transcription(status_file: Path, status_data: dict) -> dict:
-    data = dict(status_data)
-    previous_attempts = int(data.get("submit_attempts") or 0)
-    data["status"] = "queued"
-    data["job_id"] = None
-    data["sent_at"] = None
-    data["completed_at"] = None
-    data["transcript_path"] = None
-    data["submit_attempts"] = previous_attempts + 1
-    data["last_requeued_at"] = datetime.now(timezone.utc).isoformat()
-    data["error"] = "Recovered retryable failed transcription; queued again."
-    write_status(status_file, data)
-    return data
-
-
 def _is_confidential_dir(path: Path) -> bool:
     return path.name in {
         "\u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u0430\u044f \u0447\u0430\u0441\u0442\u044c",
@@ -361,11 +317,6 @@ async def monitor_loop() -> None:
                 status_data = requeue_stale_processing_without_job(status_file, status_data)
                 status = status_data.get("status")
                 print(f"[TranscriptionMonitor] Requeued stale processing transcription: {meeting_dir}")
-
-            if key not in running and retryable_failed_status(status_data):
-                status_data = requeue_failed_transcription(status_file, status_data)
-                status = status_data.get("status")
-                print(f"[TranscriptionMonitor] Requeued failed transcription: {meeting_dir}")
 
             if status == "queued" and key not in running:
                 running[key] = asyncio.create_task(run_limited(meeting_dir, status_data))
