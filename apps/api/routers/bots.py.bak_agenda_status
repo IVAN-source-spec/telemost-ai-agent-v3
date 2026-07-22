@@ -1,6 +1,3 @@
-import json
-from pathlib import Path
-
 from fastapi import APIRouter, Depends, HTTPException
 
 from core.orchestrator.contracts import (
@@ -14,63 +11,8 @@ from ..security import require_node_api_token
 from ..schemas import BotMeetingRequest, TaskResponse
 from ..session_utils import generate_session_id
 from ..task_store import create_task, get_task_by_external_event_id
-from core.storage.meeting_storage import get_meeting_storage
 
 bots_router = APIRouter(prefix="/api/v1/bots", tags=["bots"])
-
-
-def _find_meeting_dir(session_id: str | None) -> Path | None:
-    if not session_id:
-        return None
-    recordings_dir = get_meeting_storage().recordings_dir
-    try:
-        candidates = [path for path in recordings_dir.rglob("*") if path.is_dir() and session_id in path.name]
-    except Exception:
-        return None
-    return sorted(candidates)[-1] if candidates else None
-
-
-def _load_agenda_status(bot: dict) -> dict | None:
-    if not bot.get("agenda_present"):
-        return None
-    meeting_dir = _find_meeting_dir(bot.get("session_id"))
-    if meeting_dir is None:
-        return {
-            "enabled": True,
-            "status": "pending",
-            "preview": bot.get("agenda_preview"),
-        }
-    agenda_path = meeting_dir / "meeting_agenda.json"
-    if not agenda_path.exists():
-        return {
-            "enabled": True,
-            "status": "pending",
-            "preview": bot.get("agenda_preview"),
-            "meeting_dir": str(meeting_dir),
-        }
-    try:
-        data = json.loads(agenda_path.read_text(encoding="utf-8"))
-    except Exception as error:
-        return {
-            "enabled": True,
-            "status": "error",
-            "error": str(error),
-            "meeting_dir": str(meeting_dir),
-        }
-    current_index = data.get("current_index")
-    items = data.get("items") or []
-    current_title = None
-    if isinstance(current_index, int) and 1 <= current_index <= len(items):
-        current_title = items[current_index - 1].get("title")
-    return {
-        "enabled": True,
-        "status": "completed" if current_index is None else "active",
-        "current_index": current_index,
-        "current_title": current_title,
-        "total": data.get("total") or len(items),
-        "meeting_dir": str(meeting_dir),
-        "updated_at": data.get("updated_at"),
-    }
 
 
 @bots_router.get("/")
@@ -84,7 +26,6 @@ async def list_bots(_auth=Depends(require_node_api_token), bot_selector=Depends(
     bots = [
         {
             **bot,
-            "agenda_status": _load_agenda_status(bot),
             "node_id": node_id,
             "node_name": node_name,
             "global_bot_id": get_global_bot_id(bot["bot_id"]),
@@ -117,23 +58,18 @@ async def _enqueue_bot_meeting(
 ) -> TaskResponse:
     existing = get_task_by_external_event_id(req.external_event_id)
     if existing is not None:
-        existing_metadata = existing.get("metadata") or {}
-        same_calendar_occurrence = existing_metadata.get("scheduled_start_at") == req.scheduled_start_at
-        if same_calendar_occurrence:
-            if hasattr(bot_selector, "release_bot"):
-                await bot_selector.release_bot(bot.bot_id)
-            return TaskResponse(
-                task_id=existing["task_id"],
-                status=existing["status"],
-                bot_id=existing_metadata.get("bot_id"),
-                queue_message_id=existing_metadata.get("queue_message_id"),
-            )
+        return TaskResponse(
+            task_id=existing["task_id"],
+            status=existing["status"],
+            bot_id=(existing.get("metadata") or {}).get("bot_id"),
+            queue_message_id=(existing.get("metadata") or {}).get("queue_message_id"),
+        )
 
     session_id = generate_session_id()
     title = req.title.strip() if req.title and req.title.strip() else session_id
 
     if hasattr(bot_selector, "assign_session"):
-        await bot_selector.assign_session(bot.bot_id, session_id, req.meeting_url, title, req.agenda, req.expected_participants)
+        await bot_selector.assign_session(bot.bot_id, session_id, req.meeting_url, title)
 
     handoff = SchedulerQueueHandoff(
         session_id=session_id,
@@ -141,7 +77,6 @@ async def _enqueue_bot_meeting(
         meeting_url=req.meeting_url,
         title=title,
         agenda=req.agenda,
-        expected_participants=req.expected_participants,
         source=req.source,
         external_event_id=req.external_event_id,
         scheduled_start_at=req.scheduled_start_at,
@@ -176,7 +111,6 @@ async def _enqueue_bot_meeting(
         "meeting_url": req.meeting_url,
         "title": title,
         "agenda": req.agenda,
-        "expected_participants": req.expected_participants,
         "source": req.source,
         "external_event_id": req.external_event_id,
         "scheduled_start_at": req.scheduled_start_at,

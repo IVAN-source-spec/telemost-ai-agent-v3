@@ -329,7 +329,7 @@ async def monitor_loop() -> None:
     async def run_upload_retry_limited(meeting_dir: Path) -> None:
         async with semaphore:
             print(f"[TranscriptionMonitor] Retrying Yandex Disk upload: {meeting_dir}")
-            await finalize_meeting_folder(_meeting_dir_for_audio(audio_path))
+            await finalize_meeting_folder(meeting_dir)
 
     while True:
         for key, task in list(running.items()):

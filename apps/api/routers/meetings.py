@@ -37,6 +37,7 @@ async def create_meeting(
             "meeting_url": req.meeting_url,
             "title": req.title,
             "agenda": req.agenda,
+            "expected_participants": req.expected_participants,
             "source": req.source,
             "external_event_id": req.external_event_id,
             "scheduled_start_at": req.scheduled_start_at,

@@ -22,7 +22,6 @@ async def schedule_session(
         meeting_url: str,
         title: str | None = None,
         agenda: str | None = None,
-        expected_participants: str | None = None,
         source: str | None = None,
         external_event_id: str | None = None,
         scheduled_start_at: str | None = None,
@@ -39,7 +38,7 @@ async def schedule_session(
         raise RuntimeError("No idle bot available")
 
     if hasattr(selector, "assign_session"):
-        await selector.assign_session(bot.bot_id, session_id, meeting_url, title or session_id, agenda, expected_participants)
+        await selector.assign_session(bot.bot_id, session_id, meeting_url, title or session_id)
 
     try:
         handoff = SchedulerQueueHandoff(
@@ -48,7 +47,6 @@ async def schedule_session(
             meeting_url=meeting_url,
             title=title,
             agenda=agenda,
-            expected_participants=expected_participants,
             source=source,
             external_event_id=external_event_id,
             scheduled_start_at=scheduled_start_at,

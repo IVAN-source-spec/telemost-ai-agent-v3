@@ -39,22 +39,14 @@ class MemoryBotSelector(IdleBotSelector):
         session_id: str,
         meeting_url: str,
         title: str | None = None,
-        agenda: str | None = None,
-        expected_participants: str | None = None,
     ) -> None:
         async with self._lock:
             self._busy_bot_ids.add(bot_id)
-            agenda_text = (agenda or "").strip()
-            expected_participants_text = (expected_participants or "").strip()
             self._assignments[bot_id] = {
                 "session_id": session_id,
                 "title": title or session_id,
                 "meeting_url": meeting_url,
                 "started_at": datetime.now(timezone.utc).isoformat(),
-                "agenda_present": bool(agenda_text),
-                "agenda_preview": agenda_text[:180] if agenda_text else None,
-                "expected_participants_present": bool(expected_participants_text),
-                "expected_participants_preview": expected_participants_text[:180] if expected_participants_text else None,
             }
 
     async def list_bots(self) -> list[dict]:
@@ -71,10 +63,6 @@ class MemoryBotSelector(IdleBotSelector):
                         "title": assignment.get("title"),
                         "meeting_url": assignment.get("meeting_url"),
                         "started_at": assignment.get("started_at"),
-                        "agenda_present": assignment.get("agenda_present", False),
-                        "agenda_preview": assignment.get("agenda_preview"),
-                        "expected_participants_present": assignment.get("expected_participants_present", False),
-                        "expected_participants_preview": assignment.get("expected_participants_preview"),
                     }
                 )
             return bots

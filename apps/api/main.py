@@ -23,7 +23,14 @@ async def lifespan(
 
     async def start_transcription_monitor():
         await asyncio.sleep(1.0)
-        await monitor_loop()
+        while True:
+            try:
+                await monitor_loop()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                print(f"[Lifespan] Transcription monitor crashed: {error}")
+                await asyncio.sleep(5.0)
 
     task = asyncio.create_task(start_with_delay())
     transcription_task = asyncio.create_task(start_transcription_monitor())

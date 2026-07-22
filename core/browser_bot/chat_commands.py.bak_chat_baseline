@@ -28,10 +28,6 @@ class ChatCommandsModule:
         self._handled_command_keys: set[str] = set()
         self._monitor_task: asyncio.Task | None = None
         self._bot_sent_texts: set[str] = set()
-        self._startup_anchor_text = str()
-        self._startup_anchor_sent = False
-        self._startup_anchor_seen = False
-        self._startup_anchor_wait_scans = 0
 
     async def run_probe(self) -> Path:
         self.logger("[Bot] Chat commands module enabled")
@@ -40,27 +36,9 @@ class ChatCommandsModule:
         click_result = await self._click_chat_button()
         self.logger(f"[Bot] Chat button result: {click_result}")
 
-        await self._capture_existing_messages_baseline()
         await self._send_startup_message()
         self._start_message_monitor()
         return self._messages_path()
-
-
-    async def _capture_existing_messages_baseline(self) -> None:
-        try:
-            await self.page.wait_for_timeout(800)
-            messages = await self._read_visible_chat_messages()
-            ignored = 0
-            for message in messages:
-                if self._is_own_service_message(message):
-                    continue
-                key = self._message_key(message)
-                self._seen_message_keys.add(key)
-                self._handled_command_keys.add(key)
-                ignored += 1
-            self.logger(f"[Bot] Chat command baseline captured: {ignored} existing message(s) ignored")
-        except Exception as error:
-            self.logger(f"[Bot] Chat command baseline failed: {error}")
 
     async def _click_chat_button(self) -> str:
         result = await self.page.evaluate("""() => {
@@ -112,24 +90,14 @@ class ChatCommandsModule:
 
     async def _send_startup_message(self) -> None:
         message = self._startup_message_text()
-        self._startup_anchor_text = self._normalize_message_text(message)
         if not message:
-            self._startup_anchor_seen = True
             return
 
         try:
             send_result = await self._send_service_message(message)
-            self._startup_anchor_sent = send_result.startswith("sent")
             self.logger(f"[Bot] Chat startup message result: {send_result}")
-            if not self._startup_anchor_sent:
-                await self._capture_existing_messages_baseline()
-                self._startup_anchor_seen = False
-                self.logger("[Bot] Chat command session anchor is waiting because startup message was not confirmed")
         except Exception as error:
             self.logger(f"[Bot] Chat startup message failed: {error}")
-            await self._capture_existing_messages_baseline()
-            self._startup_anchor_seen = False
-            self.logger("[Bot] Chat command session anchor is waiting after startup message failure")
 
     def _startup_message_text(self) -> str:
         command_lines = [
@@ -501,7 +469,7 @@ class ChatCommandsModule:
 
     async def _handle_new_messages(self, messages: list[dict]) -> None:
         for message in messages:
-            key = str(message.get("_message_key") or self._message_key(message))
+            key = self._message_key(message)
             if key in self._handled_command_keys:
                 continue
 
@@ -1045,18 +1013,15 @@ class ChatCommandsModule:
         return Path.cwd() / f"chat_commands_debug_{self.bot_id}.json"
 
     def _append_new_messages(self, messages: list[dict]) -> list[dict]:
-        messages = self._messages_after_current_session_anchor(messages)
         new_records = []
         new_messages = []
-        occurrence_counts = {}
         for message in messages:
             if self._is_own_service_message(message):
                 continue
-            key = self._message_key(message, occurrence_counts)
+            key = self._message_key(message)
             if key in self._seen_message_keys:
                 continue
             self._seen_message_keys.add(key)
-            message["_message_key"] = key
             new_messages.append(message)
             new_records.append(
                 {
@@ -1075,49 +1040,6 @@ class ChatCommandsModule:
             for record in new_records:
                 file_obj.write(json.dumps(record, ensure_ascii=False) + "\n")
         return new_messages
-
-    def _messages_after_current_session_anchor(self, messages: list[dict]) -> list[dict]:
-        if not self._startup_anchor_text:
-            return messages
-        if not self._startup_anchor_sent:
-            self._mark_messages_as_old(messages)
-            self.logger(
-                f"[Bot] Chat command session anchor is not confirmed; ignored {len(messages)} visible message(s)"
-            )
-            return []
-
-        anchor_index = None
-        for index, message in enumerate(messages):
-            text = self._normalize_message_text(str(message.get("text", "")))
-            if text == self._startup_anchor_text:
-                anchor_index = index
-
-        if anchor_index is not None:
-            self._mark_messages_as_old(messages[: anchor_index + 1])
-            if not self._startup_anchor_seen:
-                self.logger(
-                    f"[Bot] Chat command session anchor found; ignored {anchor_index + 1} message(s) before current session"
-                )
-            self._startup_anchor_seen = True
-            return messages[anchor_index + 1 :]
-
-        if not self._startup_anchor_seen:
-            self._startup_anchor_wait_scans += 1
-            self._mark_messages_as_old(messages)
-            self.logger(
-                f"[Bot] Chat command session anchor not visible yet; ignored {len(messages)} visible message(s)"
-            )
-            return []
-
-        return messages
-
-    def _mark_messages_as_old(self, messages: list[dict]) -> None:
-        for message in messages:
-            if self._is_own_service_message(message):
-                continue
-            key = self._message_key(message)
-            self._seen_message_keys.add(key)
-            self._handled_command_keys.add(key)
 
     def _is_own_service_message(self, message: dict) -> bool:
         text = self._normalize_message_text(str(message.get("text", "")))
@@ -1145,19 +1067,14 @@ class ChatCommandsModule:
                 except Exception as error:
                     self.logger(f"[Bot] Could not remove chat debug artifact {artifact}: {error}")
 
-    def _message_key(self, message: dict, occurrence_counts: dict[str, int] | None = None) -> str:
-        base_key = "|".join(
+    def _message_key(self, message: dict) -> str:
+        return "|".join(
             [
                 str(message.get("author", "")),
                 str(message.get("text", "")),
                 str(message.get("time", "")),
             ]
         )
-        if occurrence_counts is None:
-            return base_key
-        occurrence_index = occurrence_counts.get(base_key, 0)
-        occurrence_counts[base_key] = occurrence_index + 1
-        return f"{base_key}|#{occurrence_index}"
 
     def _messages_path(self) -> Path:
         return Path.cwd() / f"chat_commands_messages_{self.bot_id}.jsonl"

@@ -13,6 +13,7 @@ from core.constants import USER_AGENT, VIEWPORT, CHROMIUM_ARGS
 from core.storage.meeting_storage import MeetingArtifacts, get_meeting_storage
 from core.browser_bot.chat_commands import ChatCommandsModule
 from core.browser_bot.participants_snapshot import ParticipantsSnapshotModule
+from core.browser_bot.participants_summary import ParticipantsSummaryBuilder
 from core.browser_bot.agenda_tracker import AgendaTracker
 
 DEFAULT_STORAGE_STATE_PATH = "data/auth/yandex-session.json"
@@ -41,6 +42,7 @@ class TelemostBot:
         self.session_id = None
         self.meeting_title = None
         self.agenda_text = None
+        self.expected_participants_text = None
         self.agenda_tracker = None
         self.meeting_artifacts: MeetingArtifacts | None = None
         self.meeting_started_at = None
@@ -398,8 +400,8 @@ class TelemostBot:
         await self._mute_microphone_js()
 
         self._start_recording()
-        await self._run_chat_commands_probe_if_enabled()
         await self._start_participants_snapshot_if_enabled()
+        asyncio.create_task(self._run_chat_commands_probe_if_enabled())
 
 
 
@@ -937,6 +939,7 @@ class TelemostBot:
             self.confidential_participants_snapshot_module.stop()
         if self.agenda_tracker is not None:
             self.agenda_tracker.finish()
+        self._write_participants_summary()
 
         if self.page:
             await self.page.close()
@@ -948,11 +951,24 @@ class TelemostBot:
             await self._playwright.stop()
         self._print("[Bot] Left meeting")
 
+    def _write_participants_summary(self) -> None:
+        if not self.meeting_artifacts:
+            return
+        try:
+            ParticipantsSummaryBuilder(
+                self.meeting_artifacts.meeting_dir,
+                expected_participants=self.expected_participants_text,
+                logger=self._print,
+            ).build()
+        except Exception as error:
+            self._print(f"[Bot] Participants summary failed: {error}")
+
     async def run(self, meeting_url: str, config: dict):
         """Основной цикл работы бота: вход, мониторинг, выход."""
         session_id = config.get("session_id", None)
         self.meeting_title = config.get("title")
         self.agenda_text = config.get("agenda")
+        self.expected_participants_text = config.get("expected_participants")
         await self.join(meeting_url, session_id)
 
         alone_seconds = 0

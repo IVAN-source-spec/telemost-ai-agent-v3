@@ -18,6 +18,7 @@ async def create_meeting_task(
         meeting_url=request.meeting_url,
         title=request.title,
         agenda=request.agenda,
+        expected_participants=request.expected_participants,
         source=request.source,
         external_event_id=request.external_event_id,
         scheduled_start_at=request.scheduled_start_at,

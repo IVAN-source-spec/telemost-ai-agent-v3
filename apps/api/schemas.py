@@ -7,6 +7,7 @@ class CreateMeetingRequest(BaseModel):
     meeting_url: str
     title: Optional[str] = None
     agenda: Optional[str] = None
+    expected_participants: Optional[str] = None
     source: Optional[str] = None
     external_event_id: Optional[str] = None
     scheduled_start_at: Optional[str] = None
@@ -20,6 +21,7 @@ class BotMeetingRequest(BaseModel):
     meeting_url: str
     title: Optional[str] = None
     agenda: Optional[str] = None
+    expected_participants: Optional[str] = None
     source: Optional[str] = None
     external_event_id: Optional[str] = None
     scheduled_start_at: Optional[str] = None

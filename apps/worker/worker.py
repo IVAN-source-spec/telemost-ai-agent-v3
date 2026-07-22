@@ -16,6 +16,7 @@ async def process_task(task_data):
     meeting_url = task_data.meeting_url
     title = getattr(task_data, "title", None)
     agenda = getattr(task_data, "agenda", None)
+    expected_participants = getattr(task_data, "expected_participants", None)
     source = getattr(task_data, "source", None)
     external_event_id = getattr(task_data, "external_event_id", None)
     scheduled_start_at = getattr(task_data, "scheduled_start_at", None)
@@ -46,6 +47,7 @@ async def process_task(task_data):
             "session_id": session_id,
             "title": title,
             "agenda": agenda,
+            "expected_participants": expected_participants,
             "source": source,
             "external_event_id": external_event_id,
             "scheduled_start_at": scheduled_start_at,
@@ -63,6 +65,7 @@ async def process_task(task_data):
             "audio_path": config.get("audio_path"),
             "source": source,
             "agenda": agenda,
+            "expected_participants": expected_participants,
             "external_event_id": external_event_id,
             "scheduled_start_at": scheduled_start_at,
             "scheduled_end_at": scheduled_end_at,

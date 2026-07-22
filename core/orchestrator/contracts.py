@@ -30,6 +30,7 @@ class SchedulerQueueHandoff:
     meeting_url: str
     title: str | None = None
     agenda: str | None = None
+    expected_participants: str | None = None
     source: str | None = None
     external_event_id: str | None = None
     scheduled_start_at: str | None = None
