@@ -5,6 +5,7 @@ from pathlib import Path
 from apps.api.dependencies import bot_selector_instance, queue_publisher_instance
 from apps.api.task_store import update_task_status
 from core.browser_bot.client import TelemostBot
+from core.transcription.speaker_count import target_speakers_for_audio
 
 
 queue = queue_publisher_instance
@@ -75,9 +76,12 @@ async def process_task(task_data):
 
         audio_file = Path(config["audio_path"]) if config.get("audio_path") else None
         if audio_file and audio_file.exists():
-            target_speakers = config.get("max_participants", 1)
-            if target_speakers == 0:
-                target_speakers = 1
+            target_speakers = target_speakers_for_audio(
+                audio_file,
+                fallback=int(config.get("max_participants") or 1),
+            )
+
+            print(f"[Worker] Target speakers for transcription: {target_speakers}")
 
             from core.transcription.status_manager import TranscriptionStatusManager
 

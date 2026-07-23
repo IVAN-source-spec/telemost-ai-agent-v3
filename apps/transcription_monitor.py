@@ -8,6 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from core.storage.meeting_storage import get_meeting_storage
+from core.transcription.speaker_count import load_snapshot_participant_names, target_speakers_for_audio
 
 
 load_dotenv()
@@ -170,21 +171,13 @@ async def finalize_meeting_folder(meeting_dir: Path) -> None:
         print(f"[TranscriptionMonitor] Meeting folder finalized: {meeting_dir}")
 
 
-def _target_speakers_for_audio(audio_path: Path) -> int:
-    if _is_confidential_dir(audio_path.parent):
-        meeting_time = read_status(audio_path.parent / "meeting_time.json") or {}
-        target_speakers = int(meeting_time.get("max_participants") or 0)
-        return max(1, target_speakers)
-    return int(os.getenv("TRANSCRIPTION_DEFAULT_SPEAKERS", "1"))
-
-
 def ensure_status_for_audio(audio_path: Path) -> dict:
     status_file = audio_path.parent / "transcription_status.json"
     data = read_status(status_file)
     if data is not None:
         return data
 
-    target_speakers = _target_speakers_for_audio(audio_path)
+    target_speakers = target_speakers_for_audio(audio_path)
     data = {
         "audio_path": str(audio_path),
         "job_id": None,
@@ -220,21 +213,101 @@ def find_transcript_path(meeting_dir: Path, audio_path: Path) -> str | None:
     return str(txt_files[0]) if txt_files else None
 
 
-async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: str) -> None:
+def transcription_backend() -> str:
+    return os.getenv("TRANSCRIPTION_BACKEND", "pyannote").strip().lower()
+
+
+def status_backend(status_data: dict) -> str:
+    explicit = str(status_data.get("transcription_backend") or "").strip().lower()
+    if explicit:
+        return explicit
+    job_id = str(status_data.get("job_id") or "")
+    if job_id.startswith("tr_"):
+        return "remote"
+    return transcription_backend()
+
+
+def _safe_job_id(job_id: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in job_id)
+
+
+def remote_transcript_path(audio_path: Path, job_id: str) -> Path:
+    return audio_path.parent / f"{audio_path.stem}_pyannote_{_safe_job_id(job_id)}.txt"
+
+
+def remote_job_json_path(audio_path: Path, job_id: str) -> Path:
+    return audio_path.parent / f"{audio_path.stem}_pyannote_{_safe_job_id(job_id)}.json"
+
+
+def write_remote_job_json(audio_path: Path, job_id: str, payload: dict) -> Path:
+    output_path = remote_job_json_path(audio_path, job_id)
+    data = {
+        "jobId": job_id,
+        "remoteJobId": job_id,
+        "provider": "remote-transcription-service",
+        "payload": payload,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    output_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return output_path
+
+
+def participants_for_audio(audio_path: Path) -> list[dict]:
+    snapshot_path = audio_path.parent / "participants_snapshot.json"
+    names = load_snapshot_participant_names(snapshot_path)
+    return [{"display_name": name} for name in names]
+
+
+async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: str | None) -> None:
     status_file = meeting_dir / "transcription_status.json"
     audio_path = Path(status_data["audio_path"])
-    target_speakers = int(status_data.get("target_speakers") or 1)
+    previous_target_speakers = int(status_data.get("target_speakers") or 0)
+    target_speakers = target_speakers_for_audio(audio_path, fallback=previous_target_speakers or None)
 
     data = read_status(status_file) or status_data
+    data["target_speakers"] = target_speakers
     data["status"] = "processing"
     data["sent_at"] = datetime.now(timezone.utc).isoformat()
     data["error"] = None
     write_status(status_file, data)
 
-    print(f"[TranscriptionMonitor] Submitting transcription: {audio_path}")
+    backend = transcription_backend()
+    data["transcription_backend"] = backend
+    write_status(status_file, data)
+
+    print(f"[TranscriptionMonitor] Submitting transcription via {backend}: {audio_path}")
+    print(f"[TranscriptionMonitor] Target speakers: {target_speakers}")
     try:
+        if backend == "remote":
+            from core.transcription.remote_adapter import build_remote_transcription_adapter_from_env
+
+            adapter = build_remote_transcription_adapter_from_env()
+            payload = await asyncio.to_thread(
+                adapter.submit_job,
+                str(audio_path),
+                target_speakers=target_speakers,
+                title=audio_path.parent.name,
+                participants=participants_for_audio(audio_path),
+            )
+            job_id = str(payload["job_id"])
+            data = read_status(status_file) or status_data
+            data["job_id"] = job_id
+            data["status"] = "processing"
+            data["remote_status"] = payload.get("status") or "queued"
+            data["remote_submit_response"] = payload
+            data["transcription_backend"] = "remote"
+            data["checked_at"] = datetime.now(timezone.utc).isoformat()
+            data["completed_at"] = None
+            data["transcript_path"] = None
+            data["error"] = None
+            write_status(status_file, data)
+            print(f"[TranscriptionMonitor] Remote transcription queued for {meeting_dir.name}, job_id={job_id}")
+            return
+
         from core.transcription.adapter import TranscriptionAdapter
 
+        if not api_key:
+            raise RuntimeError("PYANNOTE_API_KEY is required for pyannote backend")
         adapter = TranscriptionAdapter(
             api_key=api_key,
             similarity_mode=os.getenv("TRANSCRIPTION_SIMILARITY_MODE", "local"),
@@ -264,14 +337,53 @@ async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: st
         print(f"[TranscriptionMonitor] Failed {meeting_dir.name}: {error}")
 
 
-async def refresh_pending_status(meeting_dir: Path, status_data: dict, api_key: str) -> None:
+async def refresh_pending_status(meeting_dir: Path, status_data: dict, api_key: str | None) -> None:
     job_id = status_data.get("job_id")
     if not job_id:
         return
 
+    status_file = meeting_dir / "transcription_status.json"
+    backend = status_backend(status_data)
+
+    if backend == "remote":
+        from core.transcription.remote_adapter import build_remote_transcription_adapter_from_env
+
+        adapter = build_remote_transcription_adapter_from_env()
+        result = await asyncio.to_thread(adapter.get_job, str(job_id))
+        job_status = str(result.get("status", "unknown")).lower()
+        data = read_status(status_file) or status_data
+        data["remote_status"] = job_status
+        data["remote_status_response"] = result
+        data["checked_at"] = datetime.now(timezone.utc).isoformat()
+        data["transcription_backend"] = "remote"
+
+        if job_status == "succeeded":
+            audio_path = Path(data["audio_path"])
+            transcript_path = remote_transcript_path(audio_path, str(job_id))
+            await asyncio.to_thread(adapter.download_transcript, str(job_id), transcript_path)
+            write_remote_job_json(audio_path, str(job_id), result)
+            data["status"] = "completed"
+            data["completed_at"] = datetime.now(timezone.utc).isoformat()
+            data["transcript_path"] = str(transcript_path)
+            data["error"] = None
+            write_status(status_file, data)
+            print(f"[TranscriptionMonitor] Remote transcription completed for {meeting_dir.name}, job_id={job_id}")
+            await finalize_meeting_folder(_meeting_dir_for_audio(audio_path))
+        elif job_status == "failed":
+            data["status"] = "failed"
+            data["completed_at"] = datetime.now(timezone.utc).isoformat()
+            data["error"] = result.get("error") or "Remote transcription failed"
+            write_status(status_file, data)
+            print(f"[TranscriptionMonitor] Remote job failed for {meeting_dir.name}: {data['error']}")
+        else:
+            data["status"] = "processing"
+            write_status(status_file, data)
+        return
+
+    if not api_key:
+        raise RuntimeError("PYANNOTE_API_KEY is required for pyannote backend")
     result = await asyncio.to_thread(check_job_status, job_id, api_key)
     job_status = str(result.get("status", "unknown")).lower()
-    status_file = meeting_dir / "transcription_status.json"
 
     if job_status in {"succeeded", "completed"}:
         data = read_status(status_file) or status_data
@@ -293,8 +405,9 @@ async def refresh_pending_status(meeting_dir: Path, status_data: dict, api_key: 
 
 
 async def monitor_loop() -> None:
+    backend = transcription_backend()
     api_key = os.getenv("PYANNOTE_API_KEY")
-    if not api_key:
+    if backend != "remote" and not api_key:
         print("[TranscriptionMonitor] PYANNOTE_API_KEY not set")
         return
 
@@ -315,6 +428,7 @@ async def monitor_loop() -> None:
     next_upload_retry_at = 0.0
 
     print(f"[TranscriptionMonitor] Monitoring {recordings_dir}")
+    print(f"[TranscriptionMonitor] Backend: {backend}")
     print(f"[TranscriptionMonitor] Max parallel submissions: {max_parallel}")
     if retry_failed_uploads:
         print(

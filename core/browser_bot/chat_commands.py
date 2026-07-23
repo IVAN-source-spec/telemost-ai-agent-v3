@@ -6,15 +6,16 @@ from pathlib import Path
 
 
 class ChatCommandsModule:
+    COMMAND_DESCRIPTION_COMMANDS = ("#\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043a\u043e\u043c\u0430\u043d\u0434",)
     EXIT_BOT_COMMANDS = ("#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430",)
     NEXT_AGENDA_COMMANDS = ("#\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u043e\u043f\u0440\u043e\u0441",)
     CONFIDENTIAL_NO_RECORDING_PREFIXES = (
-        "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
         "#\u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
+        "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
     )
     CONFIDENTIAL_PREFIXES = (
-        "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f",
         "#\u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f",
+        "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f",
     )
 
     def __init__(self, page, logger=print, bot_id: str | None = None, confidential_event_handler=None, agenda_event_handler=None, agenda_enabled: bool = False):
@@ -133,16 +134,42 @@ class ChatCommandsModule:
 
     def _startup_message_text(self) -> str:
         command_lines = [
-            "\u0411\u043e\u0442 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0435\u043d \u0438 \u0433\u043e\u0442\u043e\u0432 \u043f\u0440\u0438\u043d\u0438\u043c\u0430\u0442\u044c \u043a\u043e\u043c\u0430\u043d\u0434\u044b.",
-            "\u041a\u043e\u043c\u0430\u043d\u0434\u044b:",
-            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f \u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043e\u0441\u0442\u0430\u0432\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0438 \u0437\u0430\u043f\u0438\u0448\u0435\u0442 \u043a\u043e\u043d\u0444. \u0447\u0430\u0441\u0442\u044c",
-            "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f \u0418\u043c\u044f \u0424\u0430\u043c\u0438\u043b\u0438\u044f - \u043e\u0441\u0442\u0430\u0432\u0438\u0442 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0438 \u0432\u044b\u0439\u0434\u0435\u0442",
-            "#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430 - \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u0442 \u0437\u0430\u043f\u0438\u0441\u044c \u0438 \u0432\u044b\u0439\u0434\u0435\u0442 \u0438\u0437 \u0432\u0441\u0442\u0440\u0435\u0447\u0438",
+            "Бот подключен.",
+            "Доступные команды:",
+            "#описание команд",
+            "#конфиденциально для",
+            "#конфиденциально без записи для",
+            "#выход бота",
         ]
         if self.agenda_enabled:
-            command_lines.append("#\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u043e\u043f\u0440\u043e\u0441 - \u043f\u0435\u0440\u0435\u043a\u043b\u044e\u0447\u0438\u0442 \u0442\u0430\u0439\u043c\u0435\u0440 \u043f\u043e\u0432\u0435\u0441\u0442\u043a\u0438")
+            command_lines.append("#следующий вопрос")
         default_message = "\n".join(command_lines)
         return os.getenv("TELEMOST_CHAT_COMMANDS_STARTUP_MESSAGE", default_message).strip()
+
+    def _command_description_text(self) -> str:
+        lines = [
+            "Описание команд:",
+            "",
+            "#описание команд",
+            "Показывает это сообщение с подробным описанием всех доступных команд.",
+            "",
+            "#конфиденциально для <имя участника>",
+            "Бот завершает запись основной части, удаляет из встречи всех, кроме указанных участников и себя, затем начинает новую запись конфиденциальной части.",
+            "Имена пишите в именительном падеже. Если участников несколько, указывайте их через пробел без знаков препинания.",
+            "",
+            "#конфиденциально без записи для <имя участника>",
+            "Бот удаляет из встречи всех, кроме указанных участников, завершает свою запись и выходит из звонка. Конфиденциальная часть не записывается.",
+            "",
+            "#выход бота",
+            "Бот корректно завершает участие во встрече: останавливает запись, сохраняет файлы, запускает транскрипцию и выгрузку материалов.",
+        ]
+        if self.agenda_enabled:
+            lines.extend([
+                "",
+                "#следующий вопрос",
+                "Переключает таймер повестки на следующий вопрос. Если вопросы закончились, бот сообщит, что повестка завершена.",
+            ])
+        return "\n".join(lines)
 
     async def _send_service_message(self, message: str) -> str:
         result = await self._send_message_to_chat(message)
@@ -506,6 +533,13 @@ class ChatCommandsModule:
                 continue
 
             text = str(message.get("text", ""))
+            if self._is_command_description_command(text):
+                self._handled_command_keys.add(key)
+                response = self._command_description_text()
+                result = await self._send_service_message(response)
+                self.logger(f"[Bot] Command description response result: {result}")
+                continue
+
             if self._is_exit_bot_command(text):
                 self._handled_command_keys.add(key)
                 response = self._exit_bot_response()
@@ -539,6 +573,10 @@ class ChatCommandsModule:
             self.logger(f"[Bot] Confidential participants panel result: {participants_result}")
             await self._notify_confidential_event("after_participant_cleanup", participants, mode)
 
+
+    def _is_command_description_command(self, text: str) -> bool:
+        normalized = self._normalize_message_text(text).lower()
+        return normalized in self.COMMAND_DESCRIPTION_COMMANDS
 
     def _is_next_agenda_command(self, text: str) -> bool:
         normalized = self._normalize_message_text(text).lower()

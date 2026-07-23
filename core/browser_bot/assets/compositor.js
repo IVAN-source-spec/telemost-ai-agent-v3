@@ -64,19 +64,7 @@
         const elapsed = Math.floor((Date.now() - startTimeMs) / 1000);
         const timeString = formatTime(elapsed);
 
-        ctx.fillStyle = "#f9fafb";
-        ctx.font = "bold 28px Arial";
         ctx.textAlign = "center";
-        const title = truncateText(sceneData.meetingTitle || "Telemost Bot", CANVAS_WIDTH - 48, "bold 28px Arial");
-        ctx.fillText(title, CANVAS_WIDTH / 2, 76);
-
-        ctx.fillStyle = "#9ca3af";
-        ctx.font = "18px Arial";
-        ctx.fillText("meeting time", CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 58);
-
-        ctx.fillStyle = "#34d399";
-        ctx.font = sceneData.agendaEnabled ? "bold 68px monospace" : "bold 86px monospace";
-        ctx.fillText(timeString, CANVAS_WIDTH / 2, sceneData.agendaEnabled ? CANVAS_HEIGHT / 2 + 20 : CANVAS_HEIGHT / 2 + 42);
 
         if (sceneData.agendaEnabled) {
             const questionElapsed = Math.floor((Date.now() - (sceneData.agendaQuestionStartTimeMs || Date.now())) / 1000);
@@ -84,15 +72,28 @@
             const label = `\u0432\u043e\u043f\u0440\u043e\u0441 ${sceneData.agendaIndex || 1}/${sceneData.agendaTotal || 1}`;
             ctx.fillStyle = "#9ca3af";
             ctx.font = "16px Arial";
-            ctx.fillText(label, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 72);
+            ctx.fillText(label, CANVAS_WIDTH / 2, 48);
+            ctx.fillStyle = "#fbbf24";
+            ctx.font = "bold 38px monospace";
+            ctx.fillText(questionTime, CANVAS_WIDTH / 2, 86);
             ctx.fillStyle = "#f9fafb";
             ctx.font = "bold 21px Arial";
             const agendaTitle = truncateText(sceneData.agendaTitle || "", CANVAS_WIDTH - 56, "bold 21px Arial");
-            ctx.fillText(agendaTitle, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 102);
-            ctx.fillStyle = "#fbbf24";
-            ctx.font = "bold 34px monospace";
-            ctx.fillText(questionTime, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 142);
+            ctx.fillText(agendaTitle, CANVAS_WIDTH / 2, 116);
+        } else {
+            ctx.fillStyle = "#f9fafb";
+            ctx.font = "bold 28px Arial";
+            const title = truncateText(sceneData.meetingTitle || "Telemost Bot", CANVAS_WIDTH - 48, "bold 28px Arial");
+            ctx.fillText(title, CANVAS_WIDTH / 2, 76);
         }
+
+        ctx.fillStyle = "#9ca3af";
+        ctx.font = "18px Arial";
+        ctx.fillText("meeting time", CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 58);
+
+        ctx.fillStyle = "#34d399";
+        ctx.font = sceneData.agendaEnabled ? "bold 68px monospace" : "bold 86px monospace";
+        ctx.fillText(timeString, CANVAS_WIDTH / 2, sceneData.agendaEnabled ? CANVAS_HEIGHT / 2 + 34 : CANVAS_HEIGHT / 2 + 42);
     }
 
     function drawFooter() {

@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import http.client
+import threading
 import re
 import time
 import urllib.error
@@ -121,6 +122,27 @@ class YandexDiskClient:
             if "HTTP 404" not in str(error):
                 raise
 
+    def _wait_operation(self, operation: dict, timeout_seconds: int = 300) -> None:
+        href = operation.get("href")
+        if not href:
+            return
+
+        deadline = time.monotonic() + max(1, timeout_seconds)
+        last_status = None
+        while time.monotonic() < deadline:
+            status = self._request("GET", href)
+            last_status = status.get("status")
+            if last_status == "success":
+                return
+            if last_status == "failed":
+                raise YandexDiskUploadError(f"Yandex Disk operation failed: {status}")
+            time.sleep(2)
+
+        raise YandexDiskUploadError(
+            f"Yandex Disk operation did not finish in {timeout_seconds}s: "
+            f"href={href}, last_status={last_status}"
+        )
+
     def move_resource(self, source_path: str, target_path: str, overwrite: bool = True) -> None:
         url = (
             f"{API_BASE}/move?"
@@ -130,7 +152,8 @@ class YandexDiskClient:
                 'overwrite': str(overwrite).lower(),
             })}"
         )
-        self._request("POST", url)
+        result = self._request("POST", url)
+        self._wait_operation(result)
 
     def get_resource(self, remote_path: str, limit: int = 1000) -> dict | None:
         url = (
@@ -237,6 +260,10 @@ class YandexDiskClient:
             if uploaded <= 0:
                 raise YandexDiskUploadError(f"No files uploaded from {local_dir}")
             self.move_resource(temp_dir, normalized_remote_dir, overwrite=True)
+            if not self.get_resource(normalized_remote_dir):
+                raise YandexDiskUploadError(
+                    f"Moved folder is not visible after Yandex Disk operation: {normalized_remote_dir}"
+                )
             return uploaded
         except Exception:
             try:
@@ -247,6 +274,9 @@ class YandexDiskClient:
 
 
 class YandexDiskUploader:
+    _active_uploads: set[str] = set()
+    _active_uploads_lock = threading.Lock()
+
     def __init__(self, root_dir: Path):
         self.root_dir = root_dir
         self.config = YandexDiskConfig.from_env(root_dir)
@@ -473,6 +503,21 @@ class YandexDiskUploader:
     def finalize_meeting_folder(self, meeting_dir: Path) -> bool:
         if not self.config.enabled:
             return False
+
+        upload_key = str(meeting_dir.resolve())
+        with self._active_uploads_lock:
+            if upload_key in self._active_uploads:
+                print(f"[YandexDisk] Upload already in progress, skipped duplicate finalize: {meeting_dir}")
+                return False
+            self._active_uploads.add(upload_key)
+
+        try:
+            return self._finalize_meeting_folder_locked(meeting_dir)
+        finally:
+            with self._active_uploads_lock:
+                self._active_uploads.discard(upload_key)
+
+    def _finalize_meeting_folder_locked(self, meeting_dir: Path) -> bool:
         if not self.is_meeting_folder_complete(meeting_dir):
             print(f"[YandexDisk] Meeting folder is not complete yet, upload skipped: {meeting_dir}")
             return False
