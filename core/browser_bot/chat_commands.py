@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,6 +10,8 @@ class ChatCommandsModule:
     COMMAND_DESCRIPTION_COMMANDS = ("#\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043a\u043e\u043c\u0430\u043d\u0434",)
     EXIT_BOT_COMMANDS = ("#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430",)
     NEXT_AGENDA_COMMANDS = ("#\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u043e\u043f\u0440\u043e\u0441",)
+    END_AGENDA_QUESTION_COMMANDS = ("#\u043a\u043e\u043d\u0435\u0446 \u0432\u043e\u043f\u0440\u043e\u0441\u0430",)
+    SWITCH_AGENDA_QUESTION_RE = re.compile(r"^#\s*\u0432\u043e\u043f\u0440\u043e\u0441(?:\s*\u2116|\s+\u043d\u043e\u043c\u0435\u0440)?\s*(\d+)\s*$", re.IGNORECASE)
     CONFIDENTIAL_NO_RECORDING_PREFIXES = (
         "#\u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
         "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
@@ -142,7 +145,11 @@ class ChatCommandsModule:
             "#выход бота",
         ]
         if self.agenda_enabled:
-            command_lines.append("#следующий вопрос")
+            command_lines.extend([
+                "#следующий вопрос",
+                "#вопрос №",
+                "#конец вопроса",
+            ])
         default_message = "\n".join(command_lines)
         return os.getenv("TELEMOST_CHAT_COMMANDS_STARTUP_MESSAGE", default_message).strip()
 
@@ -167,7 +174,13 @@ class ChatCommandsModule:
             lines.extend([
                 "",
                 "#следующий вопрос",
-                "Переключает таймер повестки на следующий вопрос. Если вопросы закончились, бот сообщит, что повестка завершена.",
+                "Завершает текущий вопрос и переключает таймер повестки на следующий незавершенный вопрос. Если вопросы закончились, бот сообщит, что повестка завершена.",
+                "",
+                "#вопрос №",
+                "Ставит текущий вопрос на паузу и переключает таймер на указанный незавершенный вопрос. Например: #вопрос №3.",
+                "",
+                "#конец вопроса",
+                "Окончательно завершает текущий вопрос. После этого к нему нельзя вернуться через #вопрос № или #следующий вопрос.",
             ])
         return "\n".join(lines)
 
@@ -548,14 +561,34 @@ class ChatCommandsModule:
                 await self._notify_confidential_event("exit_requested", "", "exit")
                 continue
 
-            if self.agenda_enabled and self._is_next_agenda_command(text):
-                self._handled_command_keys.add(key)
-                agenda_result = await self._notify_agenda_event("next_question")
-                response = self._agenda_response(agenda_result)
-                if response:
-                    result = await self._send_service_message(response)
-                    self.logger(f"[Bot] Agenda command response result: {result}")
-                continue
+            if self.agenda_enabled:
+                question_number = self._parse_switch_agenda_question_command(text)
+                if question_number is not None:
+                    self._handled_command_keys.add(key)
+                    agenda_result = await self._notify_agenda_event("switch_question", question_number=question_number)
+                    response = self._agenda_response(agenda_result)
+                    if response:
+                        result = await self._send_service_message(response)
+                        self.logger(f"[Bot] Agenda switch command response result: {result}")
+                    continue
+
+                if self._is_end_agenda_question_command(text):
+                    self._handled_command_keys.add(key)
+                    agenda_result = await self._notify_agenda_event("end_question")
+                    response = self._agenda_response(agenda_result)
+                    if response:
+                        result = await self._send_service_message(response)
+                        self.logger(f"[Bot] Agenda end command response result: {result}")
+                    continue
+
+                if self._is_next_agenda_command(text):
+                    self._handled_command_keys.add(key)
+                    agenda_result = await self._notify_agenda_event("next_question")
+                    response = self._agenda_response(agenda_result)
+                    if response:
+                        result = await self._send_service_message(response)
+                        self.logger(f"[Bot] Agenda command response result: {result}")
+                    continue
 
             command = self._parse_confidential_command(text)
             if not command:
@@ -582,11 +615,25 @@ class ChatCommandsModule:
         normalized = self._normalize_message_text(text).lower()
         return normalized in self.NEXT_AGENDA_COMMANDS
 
-    async def _notify_agenda_event(self, stage: str) -> dict | None:
+    def _is_end_agenda_question_command(self, text: str) -> bool:
+        normalized = self._normalize_message_text(text).lower()
+        return normalized in self.END_AGENDA_QUESTION_COMMANDS
+
+    def _parse_switch_agenda_question_command(self, text: str) -> int | None:
+        normalized = self._normalize_message_text(text).lower()
+        match = self.SWITCH_AGENDA_QUESTION_RE.match(normalized)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
+    async def _notify_agenda_event(self, stage: str, **payload) -> dict | None:
         if self.agenda_event_handler is None:
             return None
         try:
-            result = self.agenda_event_handler(stage)
+            result = self.agenda_event_handler(stage, **payload)
             if hasattr(result, "__await__"):
                 result = await result
             return result
@@ -600,11 +647,23 @@ class ChatCommandsModule:
         status = result.get("status")
         if status == "switched":
             return (
-                "\u041f\u0435\u0440\u0435\u0445\u043e\u0436\u0443 \u043a \u0432\u043e\u043f\u0440\u043e\u0441\u0443 "
+                "Перехожу к вопросу "
                 f"{result.get('index')}/{result.get('total')}: {result.get('title')}"
             )
+        if status == "already_active":
+            return f"Вопрос уже активен: {result.get('index')}/{result.get('total')}: {result.get('title')}"
+        if status == "not_found":
+            return f"В повестке нет вопроса №{result.get('number')}."
+        if status == "locked":
+            return f"Вопрос №{result.get('number')} уже завершен, вернуться к нему нельзя."
+        if status == "closed":
+            return "Текущий вопрос завершен. Следующих незавершенных вопросов нет."
+        if status == "no_next":
+            return "Следующих незавершенных вопросов нет."
+        if status == "inactive":
+            return "Сейчас нет активного вопроса повестки."
         if status == "completed":
-            return "\u041f\u043e\u0432\u0435\u0441\u0442\u043a\u0430 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0430."
+            return "Повестка завершена."
         return ""
 
     async def _notify_confidential_event(self, stage: str, participants: str, mode: str = "recording") -> None:

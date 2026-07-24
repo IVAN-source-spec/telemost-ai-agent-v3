@@ -1,0 +1,631 @@
+diff --git a/core/browser_bot/agenda_tracker.py b/core/browser_bot/agenda_tracker.py
+index 9af5533..a31dd70 100644
+--- a/core/browser_bot/agenda_tracker.py
++++ b/core/browser_bot/agenda_tracker.py
+@@ -22,8 +22,25 @@ class AgendaTracker:
+         self.current_index = 0 if self.items else None
+         self.started = False
+         self.planned_time_mode = bool(self.items) and all(item.get("planned_seconds") is not None for item in self.items)
++        self.completed = False
+         self.path = self.meeting_dir / "meeting_agenda.json"
+ 
++    @staticmethod
++    def _now() -> datetime:
++        return datetime.now(timezone.utc)
++
++    @staticmethod
++    def _parse_dt(value: str | None) -> datetime | None:
++        if not value:
++            return None
++        try:
++            parsed = datetime.fromisoformat(value)
++            if parsed.tzinfo is None:
++                parsed = parsed.replace(tzinfo=timezone.utc)
++            return parsed.astimezone(timezone.utc)
++        except Exception:
++            return None
++
+     @staticmethod
+     def _parse_planned_seconds(value: str) -> int | None:
+         text = " ".join((value or "").strip().split())
+@@ -105,8 +122,11 @@ class AgendaTracker:
+                 "started_at": None,
+                 "ended_at": None,
+                 "duration_seconds": None,
+-                "actual_seconds": None,
++                "actual_seconds": 0,
++                "segments": [],
+                 "status": "not_started",
++                "locked": False,
++                "locked_at": None,
+             })
+         return items
+ 
+@@ -118,16 +138,19 @@ class AgendaTracker:
+         if not self.enabled or self.started:
+             return
+         self.started = True
+-        self.items[0]["started_at"] = datetime.now(timezone.utc).isoformat()
+-        self.items[0]["status"] = "in_progress"
++        self.completed = False
++        self._start_segment(0)
+         self._write()
+         mode = "planned countdown" if self.planned_time_mode else "elapsed timer"
+         self.logger(f"[Bot] Agenda tracker started: {len(self.items)} items, mode={mode}")
+ 
+     def finish(self) -> None:
+-        if not self.enabled or not self.started or self.current_index is None:
++        if not self.enabled or not self.started:
+             return
+-        self._finish_current_item()
++        if self.current_index is not None:
++            self._close_current_segment(lock=True)
++            self.current_index = None
++        self.completed = self._all_items_locked()
+         self._write()
+ 
+     def next_question(self) -> dict:
+@@ -136,90 +159,199 @@ class AgendaTracker:
+         if not self.started:
+             self.start()
+         if self.current_index is None:
+-            return {"status": "completed", "message": "Agenda is already completed"}
++            return self._completed_or_waiting_result()
+ 
+-        self._finish_current_item()
+-        next_index = self.current_index + 1
+-        if next_index >= len(self.items):
++        closed = self._close_current_segment(lock=True)
++        next_index = self._find_next_unlocked_after(closed)
++        if next_index is None:
+             self.current_index = None
++            self.completed = self._all_items_locked()
+             self._write()
+-            return {"status": "completed", "message": "Agenda completed"}
+-
+-        self.current_index = next_index
+-        self.items[self.current_index]["started_at"] = datetime.now(timezone.utc).isoformat()
+-        self.items[self.current_index]["ended_at"] = None
+-        self.items[self.current_index]["duration_seconds"] = None
+-        self.items[self.current_index]["actual_seconds"] = None
+-        self.items[self.current_index]["status"] = "in_progress"
++            if self.completed:
++                return {"status": "completed", "message": "Agenda completed"}
++            return {"status": "no_next", "message": "No next unlocked agenda item"}
++
++        self._start_segment(next_index)
+         self._write()
+-        current = self.items[self.current_index]
+-        return {
+-            "status": "switched",
+-            "index": current["index"],
+-            "total": len(self.items),
+-            "title": current["title"],
+-            "message": f"Agenda item {current['index']}/{len(self.items)}: {current['title']}",
+-        }
++        return self._switched_result(self.items[next_index])
++
++    def switch_to_question(self, number: int) -> dict:
++        if not self.enabled:
++            return {"status": "disabled", "message": "Agenda is not configured"}
++        if not self.started:
++            self.start()
++
++        target_index = self._index_by_number(number)
++        if target_index is None:
++            return {"status": "not_found", "number": number, "message": f"Agenda item #{number} was not found"}
++        target = self.items[target_index]
++        if target.get("locked"):
++            return {"status": "locked", "number": number, "title": target["title"], "message": f"Agenda item #{number} is already closed"}
++        if self.current_index == target_index:
++            return {"status": "already_active", "index": target["index"], "total": len(self.items), "title": target["title"]}
++
++        if self.current_index is not None:
++            self._close_current_segment(lock=False)
++        self._start_segment(target_index)
++        self.completed = False
++        self._write()
++        return self._switched_result(target)
++
++    def end_question(self) -> dict:
++        if not self.enabled:
++            return {"status": "disabled", "message": "Agenda is not configured"}
++        if not self.started:
++            self.start()
++        if self.current_index is None:
++            return self._completed_or_waiting_result()
++
++        closed = self._close_current_segment(lock=True)
++        next_index = self._find_next_unlocked_after(closed)
++        if next_index is None:
++            self.current_index = None
++            self.completed = self._all_items_locked()
++            self._write()
++            if self.completed:
++                return {"status": "completed", "message": "Agenda completed"}
++            return {"status": "closed", "message": "Agenda item closed; no next unlocked item"}
++
++        self._start_segment(next_index)
++        self._write()
++        result = self._switched_result(self.items[next_index])
++        result["closed_previous"] = True
++        return result
+ 
+     def overlay_state(self) -> dict:
+         if not self.enabled or self.current_index is None:
+-            return {"agendaEnabled": False}
++            return {"agendaEnabled": False, "agendaCompleted": self.completed}
+         current = self.items[self.current_index]
+-        started_at = current.get("started_at")
++        active = self._active_segment(current)
++        started_at = active.get("started_at") if active else current.get("started_at")
+         if not started_at:
+-            return {"agendaEnabled": False}
+-        try:
+-            started = datetime.fromisoformat(started_at)
+-            start_ms = int(started.timestamp() * 1000)
+-        except Exception:
+-            start_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
++            return {"agendaEnabled": False, "agendaCompleted": self.completed}
++        started = self._parse_dt(started_at) or self._now()
++        start_ms = int(started.timestamp() * 1000)
+         return {
+             "agendaEnabled": True,
+             "agendaTitle": current["title"],
+             "agendaIndex": current["index"],
+             "agendaTotal": len(self.items),
+             "agendaQuestionStartTimeMs": start_ms,
++            "agendaAccumulatedSeconds": int(current.get("actual_seconds") or 0),
+             "agendaCountdownEnabled": current.get("planned_seconds") is not None,
+             "agendaPlannedSeconds": current.get("planned_seconds"),
++            "agendaCompleted": False,
+         }
+ 
+-    def _finish_current_item(self) -> None:
++    def _completed_or_waiting_result(self) -> dict:
++        if self._all_items_locked() or self.completed:
++            self.completed = True
++            return {"status": "completed", "message": "Agenda is already completed"}
++        return {"status": "inactive", "message": "Agenda has no active item"}
++
++    def _switched_result(self, current: dict) -> dict:
++        return {
++            "status": "switched",
++            "index": current["index"],
++            "number": current["number"],
++            "total": len(self.items),
++            "title": current["title"],
++            "message": f"Agenda item {current['index']}/{len(self.items)}: {current['title']}",
++        }
++
++    def _index_by_number(self, number: int) -> int | None:
++        for index, item in enumerate(self.items):
++            if int(item.get("number") or item.get("index") or 0) == number:
++                return index
++        return None
++
++    def _find_next_unlocked_after(self, index: int) -> int | None:
++        for next_index in range(index + 1, len(self.items)):
++            if not self.items[next_index].get("locked"):
++                return next_index
++        return None
++
++    def _all_items_locked(self) -> bool:
++        return bool(self.items) and all(item.get("locked") for item in self.items)
++
++    @staticmethod
++    def _active_segment(item: dict) -> dict | None:
++        segments = item.get("segments") or []
++        if not segments:
++            return None
++        latest = segments[-1]
++        if latest.get("ended_at"):
++            return None
++        return latest
++
++    def _start_segment(self, index: int) -> None:
++        now = self._now().isoformat()
++        item = self.items[index]
++        item["segments"].append({
++            "started_at": now,
++            "ended_at": None,
++            "duration_seconds": None,
++        })
++        item["started_at"] = item.get("started_at") or now
++        item["ended_at"] = None
++        item["status"] = "in_progress"
++        self.current_index = index
++        self.completed = False
++
++    def _close_current_segment(self, lock: bool) -> int:
+         if self.current_index is None:
+-            return
+-        current = self.items[self.current_index]
+-        if current.get("ended_at"):
+-            return
+-        ended = datetime.now(timezone.utc)
++            return -1
++        index = self.current_index
++        current = self.items[index]
++        active = self._active_segment(current)
++        ended = self._now()
++        if active is not None:
++            active["ended_at"] = ended.isoformat()
++            started = self._parse_dt(active.get("started_at"))
++            if started:
++                active["duration_seconds"] = max(0, int((ended - started).total_seconds()))
++        self._recalculate_item(current)
+         current["ended_at"] = ended.isoformat()
+-        started_at = current.get("started_at")
+-        if started_at:
+-            try:
+-                started = datetime.fromisoformat(started_at)
+-                actual_seconds = max(0, int((ended - started).total_seconds()))
+-                current["duration_seconds"] = actual_seconds
+-                current["actual_seconds"] = actual_seconds
+-            except Exception:
+-                current["duration_seconds"] = None
+-                current["actual_seconds"] = None
+-        planned_seconds = current.get("planned_seconds")
+-        actual_seconds = current.get("actual_seconds")
++        if lock:
++            current["locked"] = True
++            current["locked_at"] = ended.isoformat()
++            self._set_completed_status(current)
++        else:
++            current["status"] = "paused"
++        return index
++
++    @staticmethod
++    def _recalculate_item(item: dict) -> None:
++        total = 0
++        for segment in item.get("segments") or []:
++            duration = segment.get("duration_seconds")
++            if duration is not None:
++                total += int(duration)
++        item["actual_seconds"] = total
++        item["duration_seconds"] = total
++
++    @staticmethod
++    def _set_completed_status(item: dict) -> None:
++        planned_seconds = item.get("planned_seconds")
++        actual_seconds = item.get("actual_seconds")
+         if planned_seconds is None:
+-            current["status"] = "completed_without_plan"
++            item["status"] = "completed_without_plan"
+         elif actual_seconds is None:
+-            current["status"] = "completed_unknown"
+-        elif actual_seconds <= planned_seconds:
+-            current["status"] = "within_time"
++            item["status"] = "completed_unknown"
++        elif int(actual_seconds) <= int(planned_seconds):
++            item["status"] = "within_time"
+         else:
+-            current["status"] = "over_time"
++            item["status"] = "over_time"
+ 
+     def _write(self) -> None:
+         self.meeting_dir.mkdir(parents=True, exist_ok=True)
+         payload = {
+             "source": self.raw_agenda,
+             "planned_time_mode": self.planned_time_mode,
++            "completed": self.completed,
+             "current_index": None if self.current_index is None else self.current_index + 1,
+             "total": len(self.items),
+             "items": self.items,
+-            "updated_at": datetime.now(timezone.utc).isoformat(),
++            "updated_at": self._now().isoformat(),
+         }
+         self.path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+diff --git a/core/browser_bot/assets/compositor.js b/core/browser_bot/assets/compositor.js
+index 0e766cc..8ca8247 100644
+--- a/core/browser_bot/assets/compositor.js
++++ b/core/browser_bot/assets/compositor.js
+@@ -67,7 +67,9 @@
+         ctx.textAlign = "center";
+ 
+         if (sceneData.agendaEnabled) {
+-            const questionElapsed = Math.floor((Date.now() - (sceneData.agendaQuestionStartTimeMs || Date.now())) / 1000);
++            const segmentElapsed = Math.floor((Date.now() - (sceneData.agendaQuestionStartTimeMs || Date.now())) / 1000);
++            const accumulatedSeconds = Number(sceneData.agendaAccumulatedSeconds || 0);
++            const questionElapsed = accumulatedSeconds + segmentElapsed;
+             const plannedSeconds = Number(sceneData.agendaPlannedSeconds || 0);
+             const hasCountdown = Boolean(sceneData.agendaCountdownEnabled && plannedSeconds > 0);
+             const remainingSeconds = plannedSeconds - questionElapsed;
+@@ -78,14 +80,14 @@
+             const label = `\u0432\u043e\u043f\u0440\u043e\u0441 ${sceneData.agendaIndex || 1}/${sceneData.agendaTotal || 1} · ${labelSuffix}`;
+             ctx.fillStyle = "#9ca3af";
+             ctx.font = "16px Arial";
+-            ctx.fillText(label, CANVAS_WIDTH / 2, 48);
++            ctx.fillText(label, CANVAS_WIDTH / 2, 72);
+             ctx.fillStyle = hasCountdown && remainingSeconds < 0 ? "#fb7185" : "#fbbf24";
+             ctx.font = "bold 38px monospace";
+-            ctx.fillText(questionTime, CANVAS_WIDTH / 2, 86);
++            ctx.fillText(questionTime, CANVAS_WIDTH / 2, 110);
+             ctx.fillStyle = "#f9fafb";
+             ctx.font = "bold 21px Arial";
+             const agendaTitle = truncateText(sceneData.agendaTitle || "", CANVAS_WIDTH - 56, "bold 21px Arial");
+-            ctx.fillText(agendaTitle, CANVAS_WIDTH / 2, 116);
++            ctx.fillText(agendaTitle, CANVAS_WIDTH / 2, 140);
+         } else {
+             ctx.fillStyle = "#f9fafb";
+             ctx.font = "bold 28px Arial";
+diff --git a/core/browser_bot/chat_commands.py b/core/browser_bot/chat_commands.py
+index 7799d0a..8f3124f 100644
+--- a/core/browser_bot/chat_commands.py
++++ b/core/browser_bot/chat_commands.py
+@@ -1,6 +1,7 @@
+ import asyncio
+ import json
+ import os
++import re
+ from datetime import datetime, timezone
+ from pathlib import Path
+ 
+@@ -9,6 +10,8 @@ class ChatCommandsModule:
+     COMMAND_DESCRIPTION_COMMANDS = ("#\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043a\u043e\u043c\u0430\u043d\u0434",)
+     EXIT_BOT_COMMANDS = ("#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430",)
+     NEXT_AGENDA_COMMANDS = ("#\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u043e\u043f\u0440\u043e\u0441",)
++    END_AGENDA_QUESTION_COMMANDS = ("#\u043a\u043e\u043d\u0435\u0446 \u0432\u043e\u043f\u0440\u043e\u0441\u0430",)
++    SWITCH_AGENDA_QUESTION_RE = re.compile(r"^#\s*\u0432\u043e\u043f\u0440\u043e\u0441(?:\s*\u2116|\s+\u043d\u043e\u043c\u0435\u0440)?\s*(\d+)\s*$", re.IGNORECASE)
+     CONFIDENTIAL_NO_RECORDING_PREFIXES = (
+         "#\u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
+         "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
+@@ -142,7 +145,11 @@ class ChatCommandsModule:
+             "#выход бота",
+         ]
+         if self.agenda_enabled:
+-            command_lines.append("#следующий вопрос")
++            command_lines.extend([
++                "#следующий вопрос",
++                "#вопрос №",
++                "#конец вопроса",
++            ])
+         default_message = "\n".join(command_lines)
+         return os.getenv("TELEMOST_CHAT_COMMANDS_STARTUP_MESSAGE", default_message).strip()
+ 
+@@ -167,7 +174,13 @@ class ChatCommandsModule:
+             lines.extend([
+                 "",
+                 "#следующий вопрос",
+-                "Переключает таймер повестки на следующий вопрос. Если вопросы закончились, бот сообщит, что повестка завершена.",
++                "Завершает текущий вопрос и переключает таймер повестки на следующий незавершенный вопрос. Если вопросы закончились, бот сообщит, что повестка завершена.",
++                "",
++                "#вопрос №",
++                "Ставит текущий вопрос на паузу и переключает таймер на указанный незавершенный вопрос. Например: #вопрос №3.",
++                "",
++                "#конец вопроса",
++                "Окончательно завершает текущий вопрос. После этого к нему нельзя вернуться через #вопрос № или #следующий вопрос.",
+             ])
+         return "\n".join(lines)
+ 
+@@ -548,14 +561,34 @@ class ChatCommandsModule:
+                 await self._notify_confidential_event("exit_requested", "", "exit")
+                 continue
+ 
+-            if self.agenda_enabled and self._is_next_agenda_command(text):
+-                self._handled_command_keys.add(key)
+-                agenda_result = await self._notify_agenda_event("next_question")
+-                response = self._agenda_response(agenda_result)
+-                if response:
+-                    result = await self._send_service_message(response)
+-                    self.logger(f"[Bot] Agenda command response result: {result}")
+-                continue
++            if self.agenda_enabled:
++                question_number = self._parse_switch_agenda_question_command(text)
++                if question_number is not None:
++                    self._handled_command_keys.add(key)
++                    agenda_result = await self._notify_agenda_event("switch_question", question_number=question_number)
++                    response = self._agenda_response(agenda_result)
++                    if response:
++                        result = await self._send_service_message(response)
++                        self.logger(f"[Bot] Agenda switch command response result: {result}")
++                    continue
++
++                if self._is_end_agenda_question_command(text):
++                    self._handled_command_keys.add(key)
++                    agenda_result = await self._notify_agenda_event("end_question")
++                    response = self._agenda_response(agenda_result)
++                    if response:
++                        result = await self._send_service_message(response)
++                        self.logger(f"[Bot] Agenda end command response result: {result}")
++                    continue
++
++                if self._is_next_agenda_command(text):
++                    self._handled_command_keys.add(key)
++                    agenda_result = await self._notify_agenda_event("next_question")
++                    response = self._agenda_response(agenda_result)
++                    if response:
++                        result = await self._send_service_message(response)
++                        self.logger(f"[Bot] Agenda command response result: {result}")
++                    continue
+ 
+             command = self._parse_confidential_command(text)
+             if not command:
+@@ -582,11 +615,25 @@ class ChatCommandsModule:
+         normalized = self._normalize_message_text(text).lower()
+         return normalized in self.NEXT_AGENDA_COMMANDS
+ 
+-    async def _notify_agenda_event(self, stage: str) -> dict | None:
++    def _is_end_agenda_question_command(self, text: str) -> bool:
++        normalized = self._normalize_message_text(text).lower()
++        return normalized in self.END_AGENDA_QUESTION_COMMANDS
++
++    def _parse_switch_agenda_question_command(self, text: str) -> int | None:
++        normalized = self._normalize_message_text(text).lower()
++        match = self.SWITCH_AGENDA_QUESTION_RE.match(normalized)
++        if not match:
++            return None
++        try:
++            return int(match.group(1))
++        except ValueError:
++            return None
++
++    async def _notify_agenda_event(self, stage: str, **payload) -> dict | None:
+         if self.agenda_event_handler is None:
+             return None
+         try:
+-            result = self.agenda_event_handler(stage)
++            result = self.agenda_event_handler(stage, **payload)
+             if hasattr(result, "__await__"):
+                 result = await result
+             return result
+@@ -600,11 +647,23 @@ class ChatCommandsModule:
+         status = result.get("status")
+         if status == "switched":
+             return (
+-                "\u041f\u0435\u0440\u0435\u0445\u043e\u0436\u0443 \u043a \u0432\u043e\u043f\u0440\u043e\u0441\u0443 "
++                "Перехожу к вопросу "
+                 f"{result.get('index')}/{result.get('total')}: {result.get('title')}"
+             )
++        if status == "already_active":
++            return f"Вопрос уже активен: {result.get('index')}/{result.get('total')}: {result.get('title')}"
++        if status == "not_found":
++            return f"В повестке нет вопроса №{result.get('number')}."
++        if status == "locked":
++            return f"Вопрос №{result.get('number')} уже завершен, вернуться к нему нельзя."
++        if status == "closed":
++            return "Текущий вопрос завершен. Следующих незавершенных вопросов нет."
++        if status == "no_next":
++            return "Следующих незавершенных вопросов нет."
++        if status == "inactive":
++            return "Сейчас нет активного вопроса повестки."
+         if status == "completed":
+-            return "\u041f\u043e\u0432\u0435\u0441\u0442\u043a\u0430 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0430."
++            return "Повестка завершена."
+         return ""
+ 
+     async def _notify_confidential_event(self, stage: str, participants: str, mode: str = "recording") -> None:
+diff --git a/core/browser_bot/client.py b/core/browser_bot/client.py
+index a920068..6722334 100644
+--- a/core/browser_bot/client.py
++++ b/core/browser_bot/client.py
+@@ -236,6 +236,98 @@ class TelemostBot:
+             await self.page.wait_for_timeout(1000)
+         return "join button not found"
+ 
++    async def _ensure_timer_camera_enabled(self) -> None:
++        """Turn on the synthetic timer camera when Telemost joins with video disabled."""
++        if not self.page:
++            return
++
++        for attempt in range(1, 6):
++            try:
++                result = await self.page.evaluate(r"""() => {
++                    const isVisible = (el) => {
++                        if (!el) return false;
++                        const rect = el.getBoundingClientRect();
++                        const style = window.getComputedStyle(el);
++                        return rect.width > 0 && rect.height > 0 &&
++                            style.display !== 'none' && style.visibility !== 'hidden';
++                    };
++                    const normalize = (value) => (value || '').toString().trim().toLowerCase();
++                    const describe = (el) => [
++                        el.getAttribute('aria-label'),
++                        el.getAttribute('title'),
++                        el.getAttribute('data-testid'),
++                        el.innerText,
++                        el.textContent,
++                    ].map(normalize).filter(Boolean).join(' ');
++                    const clickElement = (el, reason) => {
++                        el.scrollIntoView({ block: 'center', inline: 'center' });
++                        el.click();
++                        return `clicked camera on: ${reason}`;
++                    };
++
++                    const directSelectors = [
++                        '[data-testid="turn-on-camera"]',
++                        '[data-testid="camera-on"]',
++                        'button[aria-label*="Включить камеру"]',
++                        'button[title*="Включить камеру"]',
++                        '[role="button"][aria-label*="Включить камеру"]',
++                        '[role="button"][title*="Включить камеру"]',
++                        'button[aria-label*="Включить видео"]',
++                        'button[title*="Включить видео"]',
++                    ];
++                    for (const selector of directSelectors) {
++                        const element = document.querySelector(selector);
++                        if (isVisible(element) && !element.disabled) {
++                            return clickElement(element, selector);
++                        }
++                    }
++
++                    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'))
++                        .filter((button) => isVisible(button) && !button.disabled);
++
++                    for (const button of buttons) {
++                        const info = describe(button);
++                        const isCameraControl =
++                            info.includes('камера') || info.includes('видео') ||
++                            info.includes('camera') || info.includes('video') ||
++                            info.includes('mute-video') || info.includes('turn-on-camera');
++                        if (!isCameraControl) continue;
++
++                        const isOnControl =
++                            info.includes('выключить камеру') ||
++                            info.includes('выключить видео') ||
++                            info.includes('turn off camera') ||
++                            info.includes('stop video') ||
++                            info.includes('disable camera');
++                        if (isOnControl) {
++                            return `camera already on: ${info}`;
++                        }
++
++                        const isOffControl =
++                            info.includes('включить камеру') ||
++                            info.includes('включить видео') ||
++                            info.includes('turn on camera') ||
++                            info.includes('start video') ||
++                            info.includes('enable camera') ||
++                            info.includes('turn-on-camera') ||
++                            info.includes('mute-video');
++                        if (isOffControl) {
++                            return clickElement(button, info || 'camera button');
++                        }
++                    }
++
++                    return 'camera off control not found';
++                }""")
++                self._print(f"[Bot] Timer camera ensure result: {result} (attempt {attempt}/5)")
++                if isinstance(result, str) and result.startswith('clicked camera on'):
++                    await self.page.wait_for_timeout(2000)
++                    return
++                if isinstance(result, str) and result.startswith('camera already on'):
++                    return
++            except Exception as e:
++                self._print(f"[Bot] Timer camera ensure failed: {e} (attempt {attempt}/5)")
++            await self.page.wait_for_timeout(1000)
++
+     async def _mute_microphone_js(self):
+         try:
+             result = await self.page.evaluate('''() => {
+@@ -397,6 +489,8 @@ class TelemostBot:
+         self._start_meeting_timer()
+         self._start_agenda_tracker_if_enabled()
+         await self._push_timer_camera_state()
++        await self._ensure_timer_camera_enabled()
++        await self._push_timer_camera_state()
+         await self._mute_microphone_js()
+ 
+         self._start_recording()
+@@ -427,10 +521,17 @@ class TelemostBot:
+             self.agenda_tracker = None
+             self._print(f"[Bot] Agenda tracker start failed: {error}")
+ 
+-    async def _handle_agenda_event(self, stage: str) -> dict | None:
+-        if stage != "next_question" or self.agenda_tracker is None:
++    async def _handle_agenda_event(self, stage: str, **payload) -> dict | None:
++        if self.agenda_tracker is None:
+             return {"status": "disabled"}
+-        result = self.agenda_tracker.next_question()
++        if stage == "next_question":
++            result = self.agenda_tracker.next_question()
++        elif stage == "switch_question":
++            result = self.agenda_tracker.switch_to_question(int(payload.get("question_number") or 0))
++        elif stage == "end_question":
++            result = self.agenda_tracker.end_question()
++        else:
++            result = {"status": "disabled"}
+         await self._push_timer_camera_state()
+         return result
+ 

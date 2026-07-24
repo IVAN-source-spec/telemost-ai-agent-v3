@@ -427,10 +427,17 @@ class TelemostBot:
             self.agenda_tracker = None
             self._print(f"[Bot] Agenda tracker start failed: {error}")
 
-    async def _handle_agenda_event(self, stage: str) -> dict | None:
-        if stage != "next_question" or self.agenda_tracker is None:
+    async def _handle_agenda_event(self, stage: str, **payload) -> dict | None:
+        if self.agenda_tracker is None:
             return {"status": "disabled"}
-        result = self.agenda_tracker.next_question()
+        if stage == "next_question":
+            result = self.agenda_tracker.next_question()
+        elif stage == "switch_question":
+            result = self.agenda_tracker.switch_to_question(int(payload.get("question_number") or 0))
+        elif stage == "end_question":
+            result = self.agenda_tracker.end_question()
+        else:
+            result = {"status": "disabled"}
         await self._push_timer_camera_state()
         return result
 
