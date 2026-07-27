@@ -10,8 +10,15 @@ class ChatCommandsModule:
     COMMAND_DESCRIPTION_COMMANDS = ("#\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043a\u043e\u043c\u0430\u043d\u0434",)
     EXIT_BOT_COMMANDS = ("#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430",)
     NEXT_AGENDA_COMMANDS = ("#\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u043e\u043f\u0440\u043e\u0441",)
-    END_AGENDA_QUESTION_COMMANDS = ("#\u043a\u043e\u043d\u0435\u0446 \u0432\u043e\u043f\u0440\u043e\u0441\u0430",)
-    SWITCH_AGENDA_QUESTION_RE = re.compile(r"^#\s*\u0432\u043e\u043f\u0440\u043e\u0441(?:\s*\u2116|\s+\u043d\u043e\u043c\u0435\u0440)?\s*(\d+)\s*$", re.IGNORECASE)
+    END_AGENDA_QUESTION_COMMANDS = ("#конец вопроса",)
+    AGENDA_WITHOUT_TIME_COMMANDS = ("#вопросы без указания времени",)
+    UNFINISHED_AGENDA_COMMANDS = ("#незавершенные вопросы",)
+    ALL_AGENDA_COMMANDS = ("#все вопросы",)
+    SKIP_CURRENT_AGENDA_COMMANDS = ("#пропустить текущий вопрос",)
+    SWITCH_AGENDA_QUESTION_RE = re.compile(r"^#\s*вопрос(?:\s*№|\s+номер)?\s*(\d+)\s*$", re.IGNORECASE)
+    ASSIGN_AGENDA_TIME_RE = re.compile(r"^#\s*назначить\s+время\s+№\s*(\d+)\s+([0-9]+(?::[0-9]{1,2}){0,2})\s*$", re.IGNORECASE)
+    ADD_AGENDA_QUESTION_RE = re.compile(r"^#\s*добавить\s+вопрос\s+(.+?)\s*$", re.IGNORECASE)
+    SKIP_AGENDA_QUESTION_RE = re.compile(r"^#\s*пропустить\s+вопрос\s+№\s*(\d+)\s*$", re.IGNORECASE)
     CONFIDENTIAL_NO_RECORDING_PREFIXES = (
         "#\u043a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
         "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0434\u043b\u044f",
@@ -149,6 +156,13 @@ class ChatCommandsModule:
                 "#следующий вопрос",
                 "#вопрос №",
                 "#конец вопроса",
+                "#вопросы без указания времени",
+                "#незавершенные вопросы",
+                "#все вопросы",
+                "#назначить время №",
+                "#добавить вопрос",
+                "#пропустить текущий вопрос",
+                "#пропустить вопрос №",
             ])
         default_message = "\n".join(command_lines)
         return os.getenv("TELEMOST_CHAT_COMMANDS_STARTUP_MESSAGE", default_message).strip()
@@ -181,6 +195,27 @@ class ChatCommandsModule:
                 "",
                 "#конец вопроса",
                 "Окончательно завершает текущий вопрос. После этого к нему нельзя вернуться через #вопрос № или #следующий вопрос.",
+                "",
+                "#вопросы без указания времени",
+                "Показывает незавершенные вопросы, для которых не задано плановое время.",
+                "",
+                "#незавершенные вопросы",
+                "Показывает все вопросы повестки, которые еще не были завершены.",
+                "",
+                "#все вопросы",
+                "Показывает всю повестку со статусами, плановым и фактическим временем.",
+                "",
+                "#назначить время №3 10:30",
+                "Назначает или переназначает плановое время для незавершенного вопроса. Форматы: 79, 1:20, 1:04:23.",
+                "",
+                "#добавить вопрос Название вопроса - 10:30",
+                "Добавляет новый вопрос в конец повестки. Время указывать необязательно.",
+                "",
+                "#пропустить текущий вопрос",
+                "Помечает текущий вопрос как пропущенный участником и переводит повестку на следующий незавершенный вопрос.",
+                "",
+                "#пропустить вопрос №3",
+                "Помечает выбранный незавершенный вопрос как пропущенный. Автоматические переходы больше не будут на него попадать.",
             ])
         return "\n".join(lines)
 
@@ -484,7 +519,6 @@ class ChatCommandsModule:
                         if (time && text.endsWith(time)) {
                             text = clean(text.slice(0, -time.length));
                         }
-                        text = clean(text.replace(/\\s+\\d{1,2}:\\d{2}$/, ''));
                         if (!text) {
                             continue;
                         }
@@ -562,6 +596,73 @@ class ChatCommandsModule:
                 continue
 
             if self.agenda_enabled:
+                add_question_text = self._parse_add_agenda_question_command(text)
+                if add_question_text is not None:
+                    self._handled_command_keys.add(key)
+                    agenda_result = await self._notify_agenda_event("add_question", question_text=add_question_text)
+                    response = self._agenda_response(agenda_result)
+                    if response:
+                        result = await self._send_service_message(response)
+                        self.logger(f"[Bot] Agenda add question response result: {result}")
+                    continue
+
+                skip_question_number = self._parse_skip_agenda_question_command(text)
+                if skip_question_number is not None:
+                    self._handled_command_keys.add(key)
+                    agenda_result = await self._notify_agenda_event("skip_question", question_number=skip_question_number)
+                    response = self._agenda_response(agenda_result)
+                    if response:
+                        result = await self._send_service_message(response)
+                        self.logger(f"[Bot] Agenda skip question response result: {result}")
+                    continue
+
+                if self._is_skip_current_agenda_command(text):
+                    self._handled_command_keys.add(key)
+                    agenda_result = await self._notify_agenda_event("skip_current_question")
+                    response = self._agenda_response(agenda_result)
+                    if response:
+                        result = await self._send_service_message(response)
+                        self.logger(f"[Bot] Agenda skip current response result: {result}")
+                    continue
+
+                assigned_time = self._parse_assign_agenda_time_command(text)
+                if assigned_time is not None:
+                    question_number, raw_time = assigned_time
+                    self._handled_command_keys.add(key)
+                    agenda_result = await self._notify_agenda_event("assign_time", question_number=question_number, raw_time=raw_time)
+                    response = self._agenda_response(agenda_result)
+                    if response:
+                        result = await self._send_service_message(response)
+                        self.logger(f"[Bot] Agenda assign time response result: {result}")
+                    continue
+
+                if self._is_agenda_without_time_command(text):
+                    self._handled_command_keys.add(key)
+                    agenda_result = await self._notify_agenda_event("questions_without_time")
+                    response = self._agenda_response(agenda_result)
+                    if response:
+                        result = await self._send_service_message(response)
+                        self.logger(f"[Bot] Agenda without time response result: {result}")
+                    continue
+
+                if self._is_unfinished_agenda_command(text):
+                    self._handled_command_keys.add(key)
+                    agenda_result = await self._notify_agenda_event("unfinished_questions")
+                    response = self._agenda_response(agenda_result)
+                    if response:
+                        result = await self._send_service_message(response)
+                        self.logger(f"[Bot] Agenda unfinished response result: {result}")
+                    continue
+
+                if self._is_all_agenda_command(text):
+                    self._handled_command_keys.add(key)
+                    agenda_result = await self._notify_agenda_event("all_questions")
+                    response = self._agenda_response(agenda_result)
+                    if response:
+                        result = await self._send_service_message(response)
+                        self.logger(f"[Bot] Agenda all questions response result: {result}")
+                    continue
+
                 question_number = self._parse_switch_agenda_question_command(text)
                 if question_number is not None:
                     self._handled_command_keys.add(key)
@@ -629,6 +730,50 @@ class ChatCommandsModule:
         except ValueError:
             return None
 
+    def _is_agenda_without_time_command(self, text: str) -> bool:
+        normalized = self._normalize_message_text(text).lower()
+        return normalized in self.AGENDA_WITHOUT_TIME_COMMANDS
+
+    def _is_unfinished_agenda_command(self, text: str) -> bool:
+        normalized = self._normalize_message_text(text).lower()
+        return normalized in self.UNFINISHED_AGENDA_COMMANDS
+
+    def _is_all_agenda_command(self, text: str) -> bool:
+        normalized = self._normalize_message_text(text).lower()
+        return normalized in self.ALL_AGENDA_COMMANDS
+
+    def _parse_assign_agenda_time_command(self, text: str) -> tuple[int, str] | None:
+        normalized = self._normalize_message_text(text).lower()
+        match = self.ASSIGN_AGENDA_TIME_RE.match(normalized)
+        if not match:
+            return None
+        try:
+            return int(match.group(1)), match.group(2)
+        except ValueError:
+            return None
+
+    def _parse_add_agenda_question_command(self, text: str) -> str | None:
+        normalized = self._normalize_message_text(text)
+        match = self.ADD_AGENDA_QUESTION_RE.match(normalized)
+        if not match:
+            return None
+        question = " ".join(match.group(1).strip().split())
+        return question or None
+
+    def _is_skip_current_agenda_command(self, text: str) -> bool:
+        normalized = self._normalize_message_text(text).lower()
+        return normalized in self.SKIP_CURRENT_AGENDA_COMMANDS
+
+    def _parse_skip_agenda_question_command(self, text: str) -> int | None:
+        normalized = self._normalize_message_text(text).lower()
+        match = self.SKIP_AGENDA_QUESTION_RE.match(normalized)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+
     async def _notify_agenda_event(self, stage: str, **payload) -> dict | None:
         if self.agenda_event_handler is None:
             return None
@@ -650,12 +795,45 @@ class ChatCommandsModule:
                 "Перехожу к вопросу "
                 f"{result.get('index')}/{result.get('total')}: {result.get('title')}"
             )
+        if status == "items":
+            return self._agenda_items_response(result)
+        if status == "time_assigned":
+            return (
+                f"Назначил время для вопроса №{result.get('number')}: "
+                f"{result.get('planned_time')} — {result.get('title')}"
+            )
+        if status == "question_added":
+            plan = result.get("planned_time") or "без времени"
+            return f"Добавил вопрос №{result.get('number')}: {result.get('title')} — план: {plan}"
+        if status == "invalid_question":
+            return "Не смог добавить вопрос: текст вопроса пустой."
+        if status == "question_skipped":
+            skipped = result.get("skipped") or {}
+            return f"Вопрос №{skipped.get('number')} пропущен: {skipped.get('title')}"
+        if status == "already_skipped":
+            return f"Вопрос №{result.get('number')} уже пропущен."
+        if status == "skipped":
+            return f"Вопрос №{result.get('number')} пропущен и не может быть открыт."
+        if status == "skipped_and_switched":
+            skipped = result.get("skipped") or {}
+            return (
+                f"Вопрос №{skipped.get('number')} пропущен. "
+                f"Перехожу к вопросу {result.get('index')}/{result.get('total')}: {result.get('title')}"
+            )
+        if status == "skipped_completed":
+            skipped = result.get("skipped") or {}
+            return f"Вопрос №{skipped.get('number')} пропущен. Повестка завершена."
+        if status == "skipped_no_next":
+            skipped = result.get("skipped") or {}
+            return f"Вопрос №{skipped.get('number')} пропущен. Следующих незавершенных вопросов нет."
+        if status == "invalid_time":
+            return "Не смог распознать время. Используйте формат: #назначить время №3 10:30"
         if status == "already_active":
             return f"Вопрос уже активен: {result.get('index')}/{result.get('total')}: {result.get('title')}"
         if status == "not_found":
             return f"В повестке нет вопроса №{result.get('number')}."
         if status == "locked":
-            return f"Вопрос №{result.get('number')} уже завершен, вернуться к нему нельзя."
+            return f"Вопрос №{result.get('number')} уже завершен, изменить его нельзя."
         if status == "closed":
             return "Текущий вопрос завершен. Следующих незавершенных вопросов нет."
         if status == "no_next":
@@ -665,6 +843,47 @@ class ChatCommandsModule:
         if status == "completed":
             return "Повестка завершена."
         return ""
+
+    def _agenda_items_response(self, result: dict) -> str:
+        items = result.get("items") or []
+        kind = result.get("kind")
+        titles = {
+            "without_time": "Незавершенные вопросы без времени:",
+            "unfinished": "Незавершенные вопросы:",
+            "all": "Все вопросы повестки:",
+        }
+        empty = {
+            "without_time": "Незавершенных вопросов без времени нет.",
+            "unfinished": "Незавершенных вопросов нет.",
+            "all": "В повестке нет вопросов.",
+        }
+        if not items:
+            return empty.get(kind, "Вопросов нет.")
+        lines = [titles.get(kind, "Вопросы повестки:")]
+        for item in items:
+            plan = item.get("planned_time") or "без времени"
+            actual = item.get("actual_time") or "0:00"
+            status = self._agenda_status_label(str(item.get("status") or ""), bool(item.get("locked")))
+            lines.append(f"№{item.get('number')}. {item.get('title')} — план: {plan}, факт: {actual}, статус: {status}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _agenda_status_label(status: str, locked: bool) -> str:
+        if status == "in_progress":
+            return "идет"
+        if status == "paused":
+            return "на паузе"
+        if status == "within_time":
+            return "уложились"
+        if status == "over_time":
+            return "превышено"
+        if status == "completed_without_plan":
+            return "завершен без лимита"
+        if status == "skipped_by_participant":
+            return "пропущен"
+        if locked:
+            return "завершен"
+        return "не начат"
 
     async def _notify_confidential_event(self, stage: str, participants: str, mode: str = "recording") -> None:
         if self.confidential_event_handler is None:

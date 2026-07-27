@@ -436,6 +436,23 @@ class TelemostBot:
             result = self.agenda_tracker.switch_to_question(int(payload.get("question_number") or 0))
         elif stage == "end_question":
             result = self.agenda_tracker.end_question()
+        elif stage == "questions_without_time":
+            result = self.agenda_tracker.agenda_items_without_time()
+        elif stage == "unfinished_questions":
+            result = self.agenda_tracker.unfinished_questions()
+        elif stage == "all_questions":
+            result = self.agenda_tracker.all_questions()
+        elif stage == "assign_time":
+            result = self.agenda_tracker.assign_question_time(
+                int(payload.get("question_number") or 0),
+                str(payload.get("raw_time") or ""),
+            )
+        elif stage == "add_question":
+            result = self.agenda_tracker.add_question(str(payload.get("question_text") or ""))
+        elif stage == "skip_current_question":
+            result = self.agenda_tracker.skip_current_question()
+        elif stage == "skip_question":
+            result = self.agenda_tracker.skip_question(int(payload.get("question_number") or 0))
         else:
             result = {"status": "disabled"}
         await self._push_timer_camera_state()
