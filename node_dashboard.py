@@ -15,6 +15,8 @@ from pydantic import BaseModel
 class MeetingRequest(BaseModel):
     meeting_url: str
     title: str | None = None
+    agenda: str | None = None
+    expected_participants: str | None = None
     source: str | None = "node-dashboard"
     external_event_id: str | None = None
     scheduled_start_at: str | None = None
@@ -219,8 +221,10 @@ HTML = r'''<!doctype html>
     .metric { padding: 14px 16px; }
     .metric b { display:block; font-size:28px; margin-top:6px; }
     .panel { padding: 18px 20px; margin-bottom: 18px; }
-    form { display:grid; grid-template-columns: 1.6fr 1fr auto; gap: 10px; align-items:center; }
-    input { border:1px solid #cbd5e1; border-radius:8px; padding: 11px 12px; font-size:15px; }
+    .quick-form { display:grid; grid-template-columns: 1.6fr 1fr auto; gap: 10px; align-items:start; }
+    .bot-form { display:grid; grid-template-columns: 1fr; gap: 8px; margin-top: 12px; }
+    input, textarea { border:1px solid #cbd5e1; border-radius:8px; padding: 11px 12px; font-size:15px; font-family: inherit; }
+    textarea { min-height: 72px; resize: vertical; line-height: 1.35; }
     button { border:0; border-radius:8px; padding: 11px 14px; font-weight:700; background:#2563eb; color:white; cursor:pointer; }
     button.secondary { background:#0f172a; }
     button:disabled { background:#94a3b8; cursor:not-allowed; }
@@ -232,9 +236,10 @@ HTML = r'''<!doctype html>
     .bot h3 { margin:0 0 8px; font-size:18px; }
     .row { display:flex; justify-content:space-between; gap:10px; margin:5px 0; }
     .actions { display:flex; gap:8px; margin-top:12px; }
+    .field-full { grid-column: 1 / -1; }
     code { font-size:12px; background:#eef2f7; padding:2px 4px; border-radius:4px; }
     .error { color:#b91c1c; white-space:pre-wrap; }
-    @media (max-width: 800px) { .summary, form { grid-template-columns:1fr; } }
+    @media (max-width: 800px) { .summary, .quick-form { grid-template-columns:1fr; } }
   </style>
 </head>
 <body>
@@ -248,10 +253,12 @@ HTML = r'''<!doctype html>
     </section>
     <section class="panel">
       <h2>Быстрый старт</h2>
-      <form id="quickForm">
+      <form id="quickForm" class="quick-form">
         <input name="meeting_url" placeholder="Ссылка на встречу" required>
         <input name="title" placeholder="Название, необязательно">
         <button type="submit">Запустить свободного бота</button>
+        <textarea class="field-full" name="agenda" placeholder="Повестка, необязательно: ###Повестка: #1. Первый вопрос - 10:30 #2. Второй вопрос###"></textarea>
+        <textarea class="field-full" name="expected_participants" placeholder="Предполагаемые участники, необязательно: Иван Славинский <ivan@example.com>, Андрей Бельгин - andrey@example.com"></textarea>
       </form>
       <p id="message" class="muted"></p>
     </section>
@@ -272,10 +279,12 @@ HTML = r'''<!doctype html>
       if (!res.ok) throw new Error(data.detail || text || res.statusText);
       return data;
     }
-    function payloadFromInputs(prefix='') {
+    function payloadFromForm(form) {
       return {
-        meeting_url: document.querySelector(prefix + '[name="meeting_url"]').value.trim(),
-        title: document.querySelector(prefix + '[name="title"]').value.trim() || null,
+        meeting_url: form.querySelector('[name="meeting_url"]').value.trim(),
+        title: form.querySelector('[name="title"]').value.trim() || null,
+        agenda: form.querySelector('[name="agenda"]')?.value.trim() || null,
+        expected_participants: form.querySelector('[name="expected_participants"]')?.value.trim() || null,
         source: 'node-dashboard'
       };
     }
@@ -284,17 +293,25 @@ HTML = r'''<!doctype html>
       const msg = document.getElementById('message');
       msg.className = 'muted'; msg.textContent = 'Отправляю задачу...';
       try {
-        const data = await postJson('/api/v1/bots/meetings', payloadFromInputs('#quickForm '));
+        const data = await postJson('/api/v1/bots/meetings', payloadFromForm(ev.currentTarget));
         msg.textContent = `Задача создана: ${data.task_id || 'ok'}`;
         await load();
       } catch (e) { msg.className = 'error'; msg.textContent = e.message; }
     }
-    async function startBot(globalId) {
-      const url = prompt('Ссылка на встречу');
-      if (!url) return;
-      const title = prompt('Название встречи, необязательно') || null;
-      await postJson('/api/v1/bots/' + encodeURIComponent(globalId) + '/meetings', {meeting_url:url, title, source:'node-dashboard'});
-      await load();
+    async function startSpecificFromForm(ev, globalId) {
+      ev.preventDefault();
+      const form = ev.currentTarget;
+      const button = form.querySelector('button[type="submit"]');
+      button.disabled = true;
+      try {
+        await postJson('/api/v1/bots/' + encodeURIComponent(globalId) + '/meetings', payloadFromForm(form));
+        form.reset();
+        await load();
+      } catch (e) {
+        alert(e.message);
+      } finally {
+        button.disabled = false;
+      }
     }
     function render(data) {
       state = data;
@@ -318,7 +335,13 @@ HTML = r'''<!doctype html>
             <div class="row"><span>Бот</span><code>${esc(bot.bot_id)}</code></div>
             <div class="row"><span>Встреча</span><span>${esc(fmt(bot.title || bot.session_id))}</span></div>
             <div class="row"><span>Ссылка</span><span>${bot.meeting_url ? `<a href="${esc(bot.meeting_url)}" target="_blank">открыть</a>` : '—'}</span></div>
-            <div class="actions"><button ${status === 'idle' ? '' : 'disabled'} onclick="startBot('${esc(gid)}')">Запустить здесь</button></div>
+            <form class="bot-form" onsubmit="startSpecificFromForm(event, '${esc(gid)}')">
+              <input name="meeting_url" placeholder="Ссылка на встречу" required ${status === 'idle' ? '' : 'disabled'}>
+              <input name="title" placeholder="Название, необязательно" ${status === 'idle' ? '' : 'disabled'}>
+              <textarea name="agenda" placeholder="Повестка, необязательно" ${status === 'idle' ? '' : 'disabled'}></textarea>
+              <textarea name="expected_participants" placeholder="Предполагаемые участники, необязательно" ${status === 'idle' ? '' : 'disabled'}></textarea>
+              <button type="submit" ${status === 'idle' ? '' : 'disabled'}>Запустить здесь</button>
+            </form>
           </article>`);
         }
       }

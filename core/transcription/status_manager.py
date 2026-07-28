@@ -14,7 +14,16 @@ class TranscriptionStatusManager:
         job_id: str | None,
         target_speakers: int = 1,
         status: str = "pending",
+        overwrite: bool = False,
     ) -> dict:
+        if self.status_file.exists() and not overwrite:
+            try:
+                existing = json.loads(self.status_file.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    return existing
+            except Exception:
+                pass
+
         payload = {
             "audio_path": audio_path,
             "job_id": job_id,
@@ -23,9 +32,9 @@ class TranscriptionStatusManager:
             "sent_at": datetime.now(timezone.utc).isoformat(),
             "completed_at": None,
             "transcript_path": None,
-            "error": None
+            "error": None,
         }
-        self.status_file.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding='utf-8')
+        self.status_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return payload
  
     def update_status(self, job_id: str, status: str, transcript_path: Optional[str] = None, error: Optional[str] = None) -> dict | None:

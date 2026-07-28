@@ -86,6 +86,10 @@ class RemoteTranscriptionAdapter:
         title: str | None = None,
         meeting_date: str | None = None,
         participants: list[dict[str, Any]] | None = None,
+        segment_type: str | None = None,
+        result_recipients: list[dict[str, Any] | str] | None = None,
+        organizer: dict[str, Any] | None = None,
+        mqr_upload: bool | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         path = Path(audio_path).expanduser().resolve()
@@ -101,6 +105,14 @@ class RemoteTranscriptionAdapter:
             data["meeting_date"] = meeting_date.strip()
         if participants:
             data["participants"] = json.dumps(participants, ensure_ascii=False)
+        if segment_type and segment_type.strip():
+            data["segment_type"] = segment_type.strip().lower()
+        if result_recipients is not None:
+            data["result_recipients"] = json.dumps(result_recipients, ensure_ascii=False)
+        if organizer:
+            data["organizer"] = json.dumps(organizer, ensure_ascii=False)
+        if mqr_upload is not None:
+            data["mqr_upload"] = "true" if mqr_upload else "false"
 
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         content_sha256 = self._file_sha256(path)
@@ -136,6 +148,17 @@ class RemoteTranscriptionAdapter:
         with httpx.Client(timeout=self.request_timeout_seconds) as client:
             response = client.get(
                 f"{self.base_url}/api/transcriptions/{normalized_job_id}",
+                headers=self._headers(),
+            )
+        return self._json_response(response)
+
+    def retry_job(self, job_id: str) -> dict[str, Any]:
+        normalized_job_id = job_id.strip()
+        if not normalized_job_id:
+            raise ValueError("job_id is required")
+        with httpx.Client(timeout=self.request_timeout_seconds) as client:
+            response = client.post(
+                f"{self.base_url}/api/transcriptions/{normalized_job_id}/retry",
                 headers=self._headers(),
             )
         return self._json_response(response)

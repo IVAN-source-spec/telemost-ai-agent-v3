@@ -86,18 +86,25 @@ async def process_task(task_data):
             from core.transcription.status_manager import TranscriptionStatusManager
 
             status_manager = TranscriptionStatusManager(audio_file.parent)
-            status_manager.create_status(
+            status_data = status_manager.create_status(
                 audio_path=str(audio_file),
                 job_id=None,
                 target_speakers=target_speakers,
                 status="queued",
             )
+            status = str(status_data.get("status") or "queued")
             update_task_status(session_id, "completed", result={
-                "message": "Meeting finished, transcription queued",
-                "status": "queued",
+                "message": f"Meeting finished, transcription {status}",
+                "status": status,
                 **meeting_time_result,
             })
-            print(f"[Worker] Transcription queued for {session_id}")
+            if status == "queued" and not status_data.get("job_id"):
+                print(f"[Worker] Transcription queued for {session_id}")
+            else:
+                print(
+                    f"[Worker] Transcription status preserved for {session_id}: "
+                    f"{status}, job_id={status_data.get('job_id')}"
+                )
         else:
             update_task_status(session_id, "completed", result={
                 "message": "Meeting finished successfully (no audio)",

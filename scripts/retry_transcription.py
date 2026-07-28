@@ -1,7 +1,8 @@
 import argparse
 import glob
-import os
+import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -11,13 +12,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from core.transcription.adapter import TranscriptionAdapter
 from core.storage.meeting_storage import get_meeting_storage
+from core.transcription.speaker_count import target_speakers_for_audio
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Retry transcription for an existing Telemost recording."
+        description="Queue transcription retry for an existing Telemost recording via remote service."
     )
     parser.add_argument(
         "meeting",
@@ -29,19 +30,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--speakers",
         type=int,
-        default=1,
-        help="Fixed number of speakers for pyannote.",
-    )
-    parser.add_argument(
-        "--timeout-seconds",
-        type=int,
-        default=14400,
-        help="Overall transcription timeout.",
+        default=None,
+        help="Override target speaker count. By default it is derived from participant snapshots.",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Move existing *_pyannote_* files to old_pyannote_results before retrying.",
+        help="Move existing *_pyannote_* files to old_transcription_results before retrying.",
     )
     return parser
 
@@ -55,7 +50,7 @@ def move_existing_results(audio_path: Path) -> None:
     if not existing:
         return
 
-    archive_dir = audio_path.parent / "old_pyannote_results"
+    archive_dir = audio_path.parent / "old_transcription_results"
     archive_dir.mkdir(exist_ok=True)
     for path in existing:
         target = archive_dir / path.name
@@ -67,13 +62,29 @@ def move_existing_results(audio_path: Path) -> None:
         print(f"[RetryTranscription] Moved existing result: {path.name} -> {target}")
 
 
+def queue_retry(audio_path: Path, speakers: int | None) -> Path:
+    status_file = audio_path.parent / "transcription_status.json"
+    target_speakers = speakers or target_speakers_for_audio(audio_path, fallback=1)
+    payload = {
+        "audio_path": str(audio_path),
+        "job_id": None,
+        "target_speakers": target_speakers,
+        "status": "queued",
+        "transcription_backend": "remote",
+        "sent_at": None,
+        "completed_at": None,
+        "transcript_path": None,
+        "error": None,
+        "queued_at": datetime.now(timezone.utc).isoformat(),
+        "queued_by": "scripts/retry_transcription.py",
+    }
+    status_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return status_file
+
+
 def main() -> int:
     args = build_parser().parse_args()
     load_dotenv(PROJECT_ROOT / ".env")
-
-    api_key = os.getenv("PYANNOTE_API_KEY")
-    if not api_key:
-        raise SystemExit("PYANNOTE_API_KEY is not set. Add it to .env first.")
 
     audio_path = resolve_audio_path(args.meeting)
     print(f"[RetryTranscription] Audio: {audio_path}")
@@ -81,25 +92,14 @@ def main() -> int:
     if args.force:
         move_existing_results(audio_path)
 
-    adapter = TranscriptionAdapter(
-        api_key=api_key,
-        similarity_mode=os.getenv("TRANSCRIPTION_SIMILARITY_MODE", "local"),
-    )
-    job_id = adapter.submit_job(
-        audio_path=str(audio_path),
-        target_speakers=args.speakers,
-        timeout_seconds=args.timeout_seconds,
-    )
-    print(f"[RetryTranscription] job_id: {job_id}")
+    status_file = queue_retry(audio_path, args.speakers)
+    print(f"[RetryTranscription] Queued remote transcription: {status_file}")
 
     result_files = sorted(glob.glob(str(audio_path.parent / f"{audio_path.stem}_pyannote_*")))
     if result_files:
-        print("[RetryTranscription] Result files:")
+        print("[RetryTranscription] Existing result files:")
         for path in result_files:
             print(f"  - {path}")
-    else:
-        print("[RetryTranscription] No result files found.")
-
     return 0
 
 

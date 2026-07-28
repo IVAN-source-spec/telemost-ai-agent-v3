@@ -38,3 +38,15 @@ test.py
 # Другое
 .DS_Store
 *.log
+
+# Runtime debug/events
+*.jsonl
+chat_commands_action_debug_*.jsonl
+yandex_disk_upload_errors*.jsonl
+
+# Backup/rollback files
+*.bak
+*.bak_*
+*.bak-*
+*.patch
+*.before-*

@@ -1,8 +1,6 @@
 import asyncio
 import json
 import os
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -193,38 +191,12 @@ def ensure_status_for_audio(audio_path: Path) -> dict:
     return data
 
 
-def check_job_status(job_id: str, api_key: str) -> dict:
-    url = f"https://api.pyannote.ai/v1/jobs/{job_id}"
-    req = urllib.request.Request(
-        url,
-        headers={"Authorization": f"Bearer {api_key}"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        return {"status": "error", "error": str(error)}
-    except Exception as error:
-        return {"status": "error", "error": str(error)}
-
-
-def find_transcript_path(meeting_dir: Path, audio_path: Path) -> str | None:
-    txt_files = sorted(meeting_dir.glob(f"{audio_path.stem}_pyannote_*.txt"))
-    return str(txt_files[0]) if txt_files else None
-
-
 def transcription_backend() -> str:
-    return os.getenv("TRANSCRIPTION_BACKEND", "pyannote").strip().lower()
+    return "remote"
 
 
 def status_backend(status_data: dict) -> str:
-    explicit = str(status_data.get("transcription_backend") or "").strip().lower()
-    if explicit:
-        return explicit
-    job_id = str(status_data.get("job_id") or "")
-    if job_id.startswith("tr_"):
-        return "remote"
-    return transcription_backend()
+    return "remote"
 
 
 def _safe_job_id(job_id: str) -> str:
@@ -382,10 +354,172 @@ def write_empty_remote_transcript(audio_path: Path, job_id: str, result: dict) -
     return transcript_path
 
 
-def participants_for_audio(audio_path: Path) -> list[dict]:
+def _clean_text(value: object) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _clean_email(value: object) -> str | None:
+    email = _clean_text(value).lower()
+    if not email or "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+        return None
+    return email
+
+
+def _name_key(value: object) -> str:
+    return _clean_text(value).casefold()
+
+
+def _load_json_file(path: Path) -> object | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as error:
+        print(f"[TranscriptionMonitor] Could not read {path}: {error}")
+        return None
+
+
+def _split_participant_names(value: object) -> list[str]:
+    normalized = _clean_text(value)
+    if not normalized:
+        return []
+    for separator in [",", ";", "\n"]:
+        if separator in normalized:
+            return [_clean_text(part) for part in normalized.split(separator) if _clean_text(part)]
+    words = [word for word in normalized.split() if word]
+    if len(words) > 2 and len(words) % 2 == 0:
+        return [" ".join(words[index:index + 2]) for index in range(0, len(words), 2)]
+    return [normalized]
+
+
+def _summary_path_for_audio(audio_path: Path) -> Path:
+    return _meeting_dir_for_audio(audio_path) / "participants_all.json"
+
+
+def _participant_email_map(audio_path: Path) -> dict[str, str]:
+    summary = _load_json_file(_summary_path_for_audio(audio_path))
+    if not isinstance(summary, dict):
+        return {}
+
+    emails: dict[str, str] = {}
+    for item in summary.get("matched_expected_participants") or []:
+        if not isinstance(item, dict):
+            continue
+        email = _clean_email(item.get("email"))
+        if not email:
+            continue
+        for name in (item.get("actual_name"), item.get("name")):
+            key = _name_key(name)
+            if key:
+                emails[key] = email
+
+    for item in summary.get("expected_participants") or []:
+        if not isinstance(item, dict):
+            continue
+        email = _clean_email(item.get("email"))
+        key = _name_key(item.get("name"))
+        if key and email:
+            emails.setdefault(key, email)
+
+    for item in summary.get("actual_participants") or []:
+        if not isinstance(item, dict):
+            continue
+        email = _clean_email(item.get("email"))
+        key = _name_key(item.get("name"))
+        if key and email:
+            emails.setdefault(key, email)
+    return emails
+
+
+def _participant_names_for_audio(audio_path: Path) -> list[str]:
     snapshot_path = audio_path.parent / "participants_snapshot.json"
     names = load_snapshot_participant_names(snapshot_path)
-    return [{"display_name": name} for name in names]
+    if names:
+        return names
+
+    meeting_time = _load_json_file(audio_path.parent / "meeting_time.json")
+    if isinstance(meeting_time, dict):
+        names = _split_participant_names(meeting_time.get("participants"))
+        if names:
+            return names
+
+    summary = _load_json_file(_summary_path_for_audio(audio_path))
+    if isinstance(summary, dict):
+        source_name = "confidential" if _is_confidential_dir(audio_path.parent) else "main"
+        for source in summary.get("sources") or []:
+            if isinstance(source, dict) and source.get("source") == source_name:
+                names = [_clean_text(name) for name in source.get("participants") or []]
+                names = [name for name in names if name]
+                if names:
+                    return names
+        names = [_clean_text(item.get("name")) for item in summary.get("actual_participants") or [] if isinstance(item, dict)]
+        return [name for name in names if name]
+    return []
+
+
+def participants_for_audio(audio_path: Path) -> list[dict]:
+    email_by_name = _participant_email_map(audio_path)
+    participants = []
+    seen = set()
+    for name in _participant_names_for_audio(audio_path):
+        clean_name = _clean_text(name)
+        key = _name_key(clean_name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        participant = {"display_name": clean_name}
+        email = email_by_name.get(key)
+        if email:
+            participant["email"] = email
+        participants.append(participant)
+    return participants
+
+
+def segment_type_for_audio(audio_path: Path) -> str:
+    return "confidential" if _is_confidential_dir(audio_path.parent) else "public"
+
+
+def result_recipients_for_audio(audio_path: Path, participants: list[dict]) -> list[dict] | None:
+    if segment_type_for_audio(audio_path) != "confidential":
+        return None
+    recipients = []
+    seen = set()
+    for participant in participants:
+        email = _clean_email(participant.get("email"))
+        if not email or email in seen:
+            continue
+        seen.add(email)
+        recipient = {"email": email}
+        display_name = _clean_text(participant.get("display_name"))
+        if display_name:
+            recipient["display_name"] = display_name
+        recipients.append(recipient)
+    return recipients
+
+
+def organizer_for_transcription() -> dict | None:
+    email = _clean_email(
+        os.getenv("REMOTE_TRANSCRIPTION_ORGANIZER_EMAIL")
+        or os.getenv("TRANSCRIPTION_ORGANIZER_EMAIL")
+        or os.getenv("TELEMOST_ORGANIZER_EMAIL")
+    )
+    if not email:
+        return None
+    name = _clean_text(
+        os.getenv("REMOTE_TRANSCRIPTION_ORGANIZER_NAME")
+        or os.getenv("TRANSCRIPTION_ORGANIZER_NAME")
+        or os.getenv("TELEMOST_ORGANIZER_NAME")
+    )
+    organizer = {"email": email}
+    if name:
+        organizer["display_name"] = name
+    return organizer
+
+
+def transcription_title_for_audio(audio_path: Path) -> str:
+    if _is_confidential_dir(audio_path.parent):
+        return f"{_meeting_dir_for_audio(audio_path).name} - \u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u0430\u044f \u0447\u0430\u0441\u0442\u044c"
+    return audio_path.parent.name
 
 
 async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: str | None) -> None:
@@ -412,12 +546,26 @@ async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: st
             from core.transcription.remote_adapter import build_remote_transcription_adapter_from_env
 
             adapter = build_remote_transcription_adapter_from_env()
+            remote_participants = participants_for_audio(audio_path)
+            remote_segment_type = segment_type_for_audio(audio_path)
+            remote_result_recipients = result_recipients_for_audio(audio_path, remote_participants)
+            remote_organizer = organizer_for_transcription()
+            data["remote_participants"] = remote_participants
+            data["remote_segment_type"] = remote_segment_type
+            data["remote_result_recipients"] = remote_result_recipients
+            data["remote_organizer"] = remote_organizer
+            write_status(status_file, data)
+
             payload = await asyncio.to_thread(
                 adapter.submit_job,
                 str(audio_path),
                 target_speakers=target_speakers,
-                title=audio_path.parent.name,
-                participants=participants_for_audio(audio_path),
+                title=transcription_title_for_audio(audio_path),
+                participants=remote_participants,
+                segment_type=remote_segment_type,
+                result_recipients=remote_result_recipients,
+                organizer=remote_organizer,
+                mqr_upload=False if remote_segment_type == "confidential" else None,
             )
             job_id = str(payload["job_id"])
             data = read_status(status_file) or status_data
@@ -434,31 +582,6 @@ async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: st
             write_status(status_file, data)
             print(f"[TranscriptionMonitor] Remote transcription queued for {meeting_dir.name}, job_id={job_id}")
             return
-
-        from core.transcription.adapter import TranscriptionAdapter
-
-        if not api_key:
-            raise RuntimeError("PYANNOTE_API_KEY is required for pyannote backend")
-        adapter = TranscriptionAdapter(
-            api_key=api_key,
-            similarity_mode=os.getenv("TRANSCRIPTION_SIMILARITY_MODE", "local"),
-        )
-        job_id = await asyncio.to_thread(
-            adapter.submit_job,
-            str(audio_path),
-            target_speakers,
-            int(os.getenv("PYANNOTE_JOB_TIMEOUT_SECONDS", "14400")),
-        )
-
-        data = read_status(status_file) or status_data
-        data["job_id"] = job_id
-        data["status"] = "completed"
-        data["completed_at"] = datetime.now(timezone.utc).isoformat()
-        data["transcript_path"] = find_transcript_path(meeting_dir, audio_path)
-        data["error"] = None
-        write_status(status_file, data)
-        print(f"[TranscriptionMonitor] Completed {meeting_dir.name}, job_id={job_id}")
-        await finalize_meeting_folder(_meeting_dir_for_audio(audio_path))
     except Exception as error:
         data = read_status(status_file) or status_data
         data["status"] = "failed"
@@ -466,6 +589,109 @@ async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: st
         data["error"] = str(error)
         write_status(status_file, data)
         print(f"[TranscriptionMonitor] Failed {meeting_dir.name}: {error}")
+
+
+def _remote_failure_code(status_data: dict) -> str:
+    result = status_data.get("remote_status_response")
+    error = result.get("error") if isinstance(result, dict) else status_data.get("error")
+    if isinstance(error, dict):
+        return _clean_text(error.get("code")).lower()
+    return ""
+
+
+def _remote_failure_message(status_data: dict) -> str:
+    result = status_data.get("remote_status_response")
+    if isinstance(result, dict):
+        return _remote_error_message(result.get("error"))
+    return _remote_error_message(status_data.get("error"))
+
+
+def remote_job_retryable(status_data: dict) -> bool:
+    if status_backend(status_data) != "remote":
+        return False
+    if str(status_data.get("status") or "").lower() != "failed":
+        return False
+    if not str(status_data.get("job_id") or "").strip():
+        return False
+
+    attempts = int(status_data.get("remote_retry_attempts") or 0)
+    max_attempts = int(os.getenv("REMOTE_TRANSCRIPTION_JOB_MAX_RETRIES", "3"))
+    if attempts >= max(1, max_attempts):
+        return False
+
+    code = _remote_failure_code(status_data)
+    message = _remote_failure_message(status_data)
+    retry_markers = (
+        "service_restarted",
+        "Service restarted after the upload completed",
+        "TimeoutError",
+        "timed out",
+        "HTTP Error 429",
+        "HTTP Error 503",
+        "ServiceUnavailable",
+        "Service Unavailable",
+        "Connection reset",
+        "Remote end closed connection",
+    )
+    return code == "service_restarted" or any(marker in message for marker in retry_markers)
+
+
+async def refresh_failed_remote_status(meeting_dir: Path, status_data: dict) -> dict:
+    if status_backend(status_data) != "remote":
+        return status_data
+    if str(status_data.get("status") or "").lower() != "failed":
+        return status_data
+    job_id = str(status_data.get("job_id") or "").strip()
+    if not job_id:
+        return status_data
+
+    from core.transcription.remote_adapter import build_remote_transcription_adapter_from_env
+
+    status_file = meeting_dir / "transcription_status.json"
+    adapter = build_remote_transcription_adapter_from_env()
+    result = await asyncio.to_thread(adapter.get_job, job_id)
+    data = read_status(status_file) or status_data
+    data["remote_status"] = str(result.get("status") or "unknown").lower()
+    data["remote_status_response"] = result
+    data["checked_at"] = datetime.now(timezone.utc).isoformat()
+    data["transcription_backend"] = "remote"
+    write_status(status_file, data)
+    return data
+
+
+async def retry_existing_remote_job(meeting_dir: Path, status_data: dict) -> bool:
+    if not remote_job_retryable(status_data):
+        return False
+
+    from core.transcription.remote_adapter import build_remote_transcription_adapter_from_env
+
+    status_file = meeting_dir / "transcription_status.json"
+    job_id = str(status_data.get("job_id") or "").strip()
+    adapter = build_remote_transcription_adapter_from_env()
+    attempts = int(status_data.get("remote_retry_attempts") or 0) + 1
+    try:
+        payload = await asyncio.to_thread(adapter.retry_job, job_id)
+    except Exception as error:
+        data = read_status(status_file) or status_data
+        data["remote_retry_attempts"] = attempts
+        data["last_remote_retry_at"] = datetime.now(timezone.utc).isoformat()
+        data["error"] = f"Remote job retry failed: {error}"
+        write_status(status_file, data)
+        print(f"[TranscriptionMonitor] Remote job retry failed for {meeting_dir.name}, job_id={job_id}: {error}")
+        return False
+
+    data = read_status(status_file) or status_data
+    data["status"] = "processing"
+    data["remote_status"] = str(payload.get("status") or "queued").lower()
+    data["remote_retry_attempts"] = attempts
+    data["remote_retry_response"] = payload
+    data["last_remote_retry_at"] = datetime.now(timezone.utc).isoformat()
+    data["completed_at"] = None
+    data["error"] = None
+    data["checked_at"] = datetime.now(timezone.utc).isoformat()
+    write_status(status_file, data)
+    print(f"[TranscriptionMonitor] Retried existing remote job for {meeting_dir.name}, job_id={job_id}, attempt={attempts}")
+    return True
 
 
 async def complete_no_speech_remote_failure(meeting_dir: Path, status_data: dict) -> bool:
@@ -559,36 +785,10 @@ async def refresh_pending_status(meeting_dir: Path, status_data: dict, api_key: 
             write_status(status_file, data)
         return
 
-    if not api_key:
-        raise RuntimeError("PYANNOTE_API_KEY is required for pyannote backend")
-    result = await asyncio.to_thread(check_job_status, job_id, api_key)
-    job_status = str(result.get("status", "unknown")).lower()
-
-    if job_status in {"succeeded", "completed"}:
-        data = read_status(status_file) or status_data
-        audio_path = Path(data["audio_path"])
-        data["status"] = "completed"
-        data["completed_at"] = datetime.now(timezone.utc).isoformat()
-        data["transcript_path"] = find_transcript_path(meeting_dir, audio_path)
-        data["error"] = None
-        write_status(status_file, data)
-        print(f"[TranscriptionMonitor] Status updated for {meeting_dir.name}")
-        await finalize_meeting_folder(_meeting_dir_for_audio(audio_path))
-    elif job_status in {"failed", "error"}:
-        data = read_status(status_file) or status_data
-        data["status"] = "failed"
-        data["completed_at"] = datetime.now(timezone.utc).isoformat()
-        data["error"] = result.get("error") or "Unknown error"
-        write_status(status_file, data)
-        print(f"[TranscriptionMonitor] Job failed for {meeting_dir.name}")
-
 
 async def monitor_loop() -> None:
     backend = transcription_backend()
-    api_key = os.getenv("PYANNOTE_API_KEY")
-    if backend != "remote" and not api_key:
-        print("[TranscriptionMonitor] PYANNOTE_API_KEY not set")
-        return
+    api_key = None
 
     recordings_dir = Path.cwd() / "recordings"
     recordings_dir.mkdir(exist_ok=True)
@@ -656,8 +856,12 @@ async def monitor_loop() -> None:
                 print(f"[TranscriptionMonitor] Requeued stale processing transcription: {meeting_dir}")
 
             if key not in running and status == "failed":
+                status_data = await refresh_failed_remote_status(meeting_dir, status_data)
                 recovered = await complete_no_speech_remote_failure(meeting_dir, status_data)
                 if recovered:
+                    continue
+                retried_remote = await retry_existing_remote_job(meeting_dir, status_data)
+                if retried_remote:
                     continue
 
             if key not in running and retryable_failed_status(status_data):
