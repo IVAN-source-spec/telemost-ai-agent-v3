@@ -65,58 +65,123 @@ class ParticipantsSummaryBuilder:
                 }
             )
 
-        participants = sorted(participants_by_key.values(), key=lambda item: item["name"].lower())
-        attendance = self._build_attendance(participants)
+        actual_participants = sorted(participants_by_key.values(), key=lambda item: item["name"].lower())
+        attendance = self._build_attendance(actual_participants)
         payload = {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "meeting_dir": str(self.meeting_dir),
-            "participants_count": len(participants),
-            "participants": participants,
+            "participants_count": len(actual_participants),
+            "participants": actual_participants,
+            "actual_participants_count": len(actual_participants),
+            "actual_participants": actual_participants,
+            "expected_participants_count": len(attendance["expected_participants"]),
+            "expected_participants": attendance["expected_participants"],
+            "matched_expected_participants": attendance["matched_expected_participants"],
+            "missing_expected_participants": attendance["missing_expected_participants"],
+            "unexpected_actual_participants": attendance["unexpected_actual_participants"],
             "attendance": attendance,
             "sources": source_summaries,
         }
         self.output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        self.logger(f"[Bot] Participants summary saved: {len(participants)} participant(s), {self.output_path}")
+        self.logger(f"[Bot] Participants summary saved: {len(actual_participants)} participant(s), {self.output_path}")
         return self.output_path
 
 
     def _build_attendance(self, participants: list[dict]) -> dict:
-        actual_names = [item["name"] for item in participants if self._clean_name(item.get("name"))]
-        expected_names = self._parse_expected_participants(self.expected_participants_raw)
-        actual_by_key = {self._name_key(name): name for name in actual_names}
-        expected_by_key = {self._name_key(name): name for name in expected_names}
+        expected_participants = self._parse_expected_participants(self.expected_participants_raw)
+        actual_by_key = {self._name_key(item.get("name")): item for item in participants if self._clean_name(item.get("name"))}
+        expected_by_key = {self._name_key(item.get("name")): item for item in expected_participants if self._clean_name(item.get("name"))}
 
-        matched = [expected_by_key[key] for key in expected_by_key if key in actual_by_key]
-        missing = [expected_by_key[key] for key in expected_by_key if key not in actual_by_key]
-        unexpected = [actual_by_key[key] for key in actual_by_key if key not in expected_by_key]
+        matched = []
+        missing = []
+        for key, expected in expected_by_key.items():
+            actual = actual_by_key.get(key)
+            if actual:
+                matched.append({
+                    "name": expected["name"],
+                    "email": expected.get("email"),
+                    "actual_name": actual.get("name"),
+                    "actual_participant": actual,
+                })
+            else:
+                missing.append(expected)
+
+        unexpected = [actual for key, actual in actual_by_key.items() if key not in expected_by_key]
 
         return {
-            "actual_participants": actual_names,
-            "expected_participants": expected_names,
-            "matched_participants": matched,
-            "missing_participants": missing,
-            "unexpected_participants": unexpected,
+            "actual_participants_count": len(participants),
+            "actual_participants": participants,
+            "actual_participant_names": [item["name"] for item in participants if self._clean_name(item.get("name"))],
+            "expected_participants_count": len(expected_participants),
+            "expected_participants": expected_participants,
+            "expected_participant_names": [item["name"] for item in expected_participants],
+            "matched_expected_participants": matched,
+            "matched_participants": [item["name"] for item in matched],
+            "missing_expected_participants": missing,
+            "missing_participants": [item["name"] for item in missing],
+            "unexpected_actual_participants": unexpected,
+            "unexpected_participants": [item["name"] for item in unexpected],
         }
 
-    def _parse_expected_participants(self, value: str | list[str] | None) -> list[str]:
+    def _parse_expected_participants(self, value: str | list | None) -> list[dict]:
         if value is None:
             return []
+        raw_items: list = []
         if isinstance(value, list):
             raw_items = value
         else:
-            raw_items = re.split(r"[,\n\r]+", str(value))
+            raw_items = re.split(r"[,;\n\r]+", str(value))
+
         result = []
         seen = set()
         for item in raw_items:
-            name = self._clean_name(item)
-            if not name:
+            parsed = self._parse_expected_participant(item)
+            if not parsed:
                 continue
-            key = self._name_key(name)
+            key = self._name_key(parsed["name"])
             if key in seen:
                 continue
             seen.add(key)
-            result.append(name)
+            result.append(parsed)
         return result
+
+    def _parse_expected_participant(self, value) -> dict | None:
+        if isinstance(value, dict):
+            name = self._clean_name(value.get("name") or value.get("full_name") or value.get("display_name"))
+            email = self._clean_email(value.get("email") or value.get("mail"))
+            if not name and email:
+                name = email
+            return {"name": name, "email": email} if name else None
+
+        text = self._clean_name(value)
+        if not text:
+            return None
+
+        email = None
+        angle_match = re.search(r"<\s*([^<>\s@]+@[^<>\s@]+\.[^<>\s@]+)\s*>", text)
+        if angle_match:
+            email = self._clean_email(angle_match.group(1))
+            text = self._clean_name(text[:angle_match.start()] + " " + text[angle_match.end():])
+        else:
+            trailing_match = re.search(r"(?:\s+-\s+|\s+)([^\s<>@]+@[^\s<>@]+\.[^\s<>@]+)\s*$", text)
+            if trailing_match:
+                email = self._clean_email(trailing_match.group(1))
+                text = self._clean_name(text[:trailing_match.start()])
+
+        text = re.sub(r"\s+-\s*$", "", text).strip()
+        name = self._clean_name(text)
+        if not name and email:
+            name = email
+        return {"name": name, "email": email} if name else None
+
+    @staticmethod
+    def _clean_email(value) -> str | None:
+        email = " ".join(str(value or "").split()).strip().lower()
+        if not email:
+            return None
+        if not re.fullmatch(r"[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+", email):
+            return None
+        return email
 
     def _name_key(self, value) -> str:
         return self._clean_name(value).casefold()

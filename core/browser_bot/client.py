@@ -508,6 +508,10 @@ class TelemostBot:
             return self.confidential_participants_snapshot_module
         return self.participants_snapshot_module
 
+    def _handle_expected_participants_event(self, participants: list[dict]) -> None:
+        self.expected_participants_text = list(participants)
+        self._print(f"[Bot] Expected participants updated: {len(participants)}")
+
     async def _run_chat_commands_probe_if_enabled(self) -> None:
         if os.getenv("TELEMOST_CHAT_COMMANDS_ENABLED", "False") != "True":
             return
@@ -519,6 +523,8 @@ class TelemostBot:
                 confidential_event_handler=self._handle_confidential_mode_event,
                 agenda_event_handler=self._handle_agenda_event,
                 agenda_enabled=self.agenda_tracker is not None and self.agenda_tracker.enabled,
+                expected_participants=self.expected_participants_text,
+                expected_participants_event_handler=self._handle_expected_participants_event,
             )
             await module.run_probe()
         except Exception as error:

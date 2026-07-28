@@ -5,10 +5,18 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core.browser_bot.participants_summary import ParticipantsSummaryBuilder
+
 
 class ChatCommandsModule:
     COMMAND_DESCRIPTION_COMMANDS = ("#\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043a\u043e\u043c\u0430\u043d\u0434",)
     EXIT_BOT_COMMANDS = ("#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430",)
+    DELETE_PARTICIPANTS_PREFIXES = ("#\u0443\u0434\u0430\u043b\u0438\u0442\u044c \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432",)
+    ADD_EXPECTED_PARTICIPANTS_PREFIXES = ("#\u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430",)
+    REMOVE_EXPECTED_PARTICIPANTS_PREFIXES = ("#\u0443\u0434\u0430\u043b\u0438\u0442\u044c \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430",)
+    CLEAR_EXPECTED_PARTICIPANT_EMAIL_PREFIXES = ("#\u0443\u0434\u0430\u043b\u0435\u043d\u0438\u0435 \u043f\u043e\u0447\u0442\u044b \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430",)
+    CHANGE_EXPECTED_PARTICIPANT_EMAIL_PREFIXES = ("#\u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043f\u043e\u0447\u0442\u044b \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430",)
+    LIST_EXPECTED_PARTICIPANTS_COMMANDS = ("#\u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u044b\u0435 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438",)
     NEXT_AGENDA_COMMANDS = ("#\u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0438\u0439 \u0432\u043e\u043f\u0440\u043e\u0441",)
     END_AGENDA_QUESTION_COMMANDS = ("#конец вопроса",)
     AGENDA_WITHOUT_TIME_COMMANDS = ("#вопросы без указания времени",)
@@ -16,7 +24,7 @@ class ChatCommandsModule:
     ALL_AGENDA_COMMANDS = ("#все вопросы",)
     SKIP_CURRENT_AGENDA_COMMANDS = ("#пропустить текущий вопрос",)
     SWITCH_AGENDA_QUESTION_RE = re.compile(r"^#\s*вопрос(?:\s*№|\s+номер)?\s*(\d+)\s*$", re.IGNORECASE)
-    ASSIGN_AGENDA_TIME_RE = re.compile(r"^#\s*назначить\s+время\s+№\s*(\d+)\s+([0-9]+(?::[0-9]{1,2}){0,2})\s*$", re.IGNORECASE)
+    ASSIGN_AGENDA_TIME_RE = re.compile(r"^#\s*\u043d\u0430\u0437\u043d\u0430\u0447\u0438\u0442\u044c\s+\u0432\u0440\u0435\u043c\u044f\s+\u2116?\s*(\d+)\s*(?:[-\u2014]\s*)?([0-9]+(?::[0-9]{1,2}){0,2})\s*$", re.IGNORECASE)
     ADD_AGENDA_QUESTION_RE = re.compile(r"^#\s*добавить\s+вопрос\s+(.+?)\s*$", re.IGNORECASE)
     SKIP_AGENDA_QUESTION_RE = re.compile(r"^#\s*пропустить\s+вопрос\s+№\s*(\d+)\s*$", re.IGNORECASE)
     CONFIDENTIAL_NO_RECORDING_PREFIXES = (
@@ -28,13 +36,15 @@ class ChatCommandsModule:
         "#\u043a\u043e\u043d\u0444\u0435\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043b\u044f",
     )
 
-    def __init__(self, page, logger=print, bot_id: str | None = None, confidential_event_handler=None, agenda_event_handler=None, agenda_enabled: bool = False):
+    def __init__(self, page, logger=print, bot_id: str | None = None, confidential_event_handler=None, agenda_event_handler=None, agenda_enabled: bool = False, expected_participants=None, expected_participants_event_handler=None):
         self.page = page
         self.logger = logger
         self.bot_id = bot_id or "unknown"
         self.confidential_event_handler = confidential_event_handler
         self.agenda_event_handler = agenda_event_handler
         self.agenda_enabled = bool(agenda_enabled)
+        self.expected_participants_event_handler = expected_participants_event_handler
+        self._expected_participants = self._parse_expected_participant_items(expected_participants)
         self._seen_message_keys: set[str] = set()
         self._handled_command_keys: set[str] = set()
         self._monitor_task: asyncio.Task | None = None
@@ -43,6 +53,7 @@ class ChatCommandsModule:
         self._startup_anchor_sent = False
         self._startup_anchor_seen = False
         self._startup_anchor_wait_scans = 0
+        self._confidential_mode: str | None = None
 
     async def run_probe(self) -> Path:
         self.logger("[Bot] Chat commands module enabled")
@@ -165,7 +176,19 @@ class ChatCommandsModule:
                 "#пропустить вопрос №",
             ])
         default_message = "\n".join(command_lines)
-        return os.getenv("TELEMOST_CHAT_COMMANDS_STARTUP_MESSAGE", default_message).strip()
+        message = os.getenv("TELEMOST_CHAT_COMMANDS_STARTUP_MESSAGE", default_message).strip()
+        extra_commands = [
+            "#\u0443\u0434\u0430\u043b\u0438\u0442\u044c \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432",
+            "#\u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u044b\u0435 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438",
+            "#\u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430",
+            "#\u0443\u0434\u0430\u043b\u0438\u0442\u044c \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430",
+            "#\u0443\u0434\u0430\u043b\u0435\u043d\u0438\u0435 \u043f\u043e\u0447\u0442\u044b \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430",
+            "#\u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043f\u043e\u0447\u0442\u044b \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430",
+        ]
+        for command in extra_commands:
+            if command not in message:
+                message = (message + "\n" + command).strip()
+        return message
 
     def _command_description_text(self) -> str:
         lines = [
@@ -183,6 +206,24 @@ class ChatCommandsModule:
             "",
             "#выход бота",
             "Бот корректно завершает участие во встрече: останавливает запись, сохраняет файлы, запускает транскрипцию и выгрузку материалов.",
+            "",
+            "#\u0443\u0434\u0430\u043b\u0438\u0442\u044c \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432 <\u0438\u043c\u044f \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430>",
+            "\u0423\u0434\u0430\u043b\u044f\u0435\u0442 \u0438\u0437 \u0432\u0441\u0442\u0440\u0435\u0447\u0438 \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432. \u041c\u043e\u0436\u043d\u043e \u043f\u0435\u0440\u0435\u0434\u0430\u0432\u0430\u0442\u044c \u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0438\u043c\u0435\u043d \u0447\u0435\u0440\u0435\u0437 \u0437\u0430\u043f\u044f\u0442\u0443\u044e \u0438\u043b\u0438 \u043f\u0440\u043e\u0431\u0435\u043b: #\u0443\u0434\u0430\u043b\u0438\u0442\u044c \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432 \u0418\u0432\u0430\u043d \u0421\u043b\u0430\u0432\u0438\u043d\u0441\u043a\u0438\u0439, \u0410\u043d\u0434\u0440\u0435\u0439 \u0411\u0435\u043b\u044c\u0433\u0438\u043d.",
+            "",
+            "#\u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u044b\u0435 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438",
+            "\u041f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0442\u0435\u043a\u0443\u0449\u0438\u0439 \u0441\u043f\u0438\u0441\u043e\u043a \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432, \u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u0434\u043e\u043b\u0436\u043d\u044b \u0431\u044b\u043b\u0438 \u043f\u0440\u0438\u0439\u0442\u0438 \u043d\u0430 \u0432\u0441\u0442\u0440\u0435\u0447\u0443.",
+            "",
+            "#\u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430 <\u0438\u043c\u044f \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430>",
+            "\u0414\u043e\u0431\u0430\u0432\u043b\u044f\u0435\u0442 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432 \u0432 \u0441\u043f\u0438\u0441\u043e\u043a \u043e\u0436\u0438\u0434\u0430\u0435\u043c\u044b\u0445. \u041c\u043e\u0436\u043d\u043e \u043f\u0438\u0441\u0430\u0442\u044c \u0441 email \u0438\u043b\u0438 \u0431\u0435\u0437: \u0410\u043d\u0434\u0440\u0435\u0439 \u0411\u0435\u043b\u044c\u0433\u0438\u043d - andrey@example.com, \u0418\u0432\u0430\u043d \u0421\u043b\u0430\u0432\u0438\u043d\u0441\u043a\u0438\u0439 <ivan@example.com>.",
+            "",
+            "#\u0443\u0434\u0430\u043b\u0438\u0442\u044c \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430 <\u0438\u043c\u044f \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430>",
+            "\u0423\u0434\u0430\u043b\u044f\u0435\u0442 \u043e\u0434\u043d\u043e\u0433\u043e \u0438\u043b\u0438 \u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\u0438\u0445 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432 \u0438\u0437 \u0441\u043f\u0438\u0441\u043a\u0430 \u043e\u0436\u0438\u0434\u0430\u0435\u043c\u044b\u0445. \u041f\u043e\u0447\u0442\u0430 \u043f\u0440\u0438 \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u0438 \u043d\u0435 \u043e\u0431\u044f\u0437\u0430\u0442\u0435\u043b\u044c\u043d\u0430.",
+            "",
+            "#\u0443\u0434\u0430\u043b\u0435\u043d\u0438\u0435 \u043f\u043e\u0447\u0442\u044b \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430 <\u0438\u043c\u044f \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430>",
+            "\u041e\u0447\u0438\u0449\u0430\u0435\u0442 email \u0443 \u0443\u0436\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043d\u043e\u0433\u043e \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430, \u043d\u043e \u0441\u0430\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430 \u0438\u0437 \u0441\u043f\u0438\u0441\u043a\u0430 \u043d\u0435 \u0443\u0434\u0430\u043b\u044f\u0435\u0442.",
+            "",
+            "#\u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043f\u043e\u0447\u0442\u044b \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430 <\u0438\u043c\u044f> - <email>",
+            "\u041d\u0430\u0437\u043d\u0430\u0447\u0430\u0435\u0442 \u0438\u043b\u0438 \u0437\u0430\u043c\u0435\u043d\u044f\u0435\u0442 email \u0443 \u0443\u0436\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043d\u043e\u0433\u043e \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430. \u041f\u0440\u0438\u043c\u0435\u0440: #\u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043f\u043e\u0447\u0442\u044b \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430 \u0418\u0432\u0430\u043d \u0421\u043b\u0430\u0432\u0438\u043d\u0441\u043a\u0438\u0439 - ivan@example.com.",
         ]
         if self.agenda_enabled:
             lines.extend([
@@ -595,6 +636,62 @@ class ChatCommandsModule:
                 await self._notify_confidential_event("exit_requested", "", "exit")
                 continue
 
+            if self._is_list_expected_participants_command(text):
+                self._handled_command_keys.add(key)
+                result = await self._send_service_message(self._expected_participants_list_response())
+                self.logger(f"[Bot] Expected participants list response result: {result}")
+                continue
+
+            add_expected_participants = self._parse_add_expected_participants_command(text)
+            if add_expected_participants:
+                self._handled_command_keys.add(key)
+                update_result = await self._add_expected_participants(add_expected_participants)
+                result = await self._send_service_message(self._expected_participants_update_response(update_result, "add"))
+                self.logger(f"[Bot] Expected participants add response result: {result}")
+                continue
+
+            remove_expected_participants = self._parse_remove_expected_participants_command(text)
+            if remove_expected_participants:
+                self._handled_command_keys.add(key)
+                update_result = await self._remove_expected_participants(remove_expected_participants)
+                result = await self._send_service_message(self._expected_participants_update_response(update_result, "remove"))
+                self.logger(f"[Bot] Expected participants remove response result: {result}")
+                continue
+
+            clear_expected_email = self._parse_clear_expected_participant_email_command(text)
+            if clear_expected_email:
+                self._handled_command_keys.add(key)
+                update_result = await self._clear_expected_participant_email(clear_expected_email)
+                result = await self._send_service_message(self._expected_participants_email_response(update_result, "clear_email"))
+                self.logger(f"[Bot] Expected participant email clear response result: {result}")
+                continue
+
+            change_expected_email = self._parse_change_expected_participant_email_command(text)
+            if change_expected_email:
+                self._handled_command_keys.add(key)
+                update_result = await self._change_expected_participant_email(change_expected_email)
+                result = await self._send_service_message(self._expected_participants_email_response(update_result, "change_email"))
+                self.logger(f"[Bot] Expected participant email change response result: {result}")
+                continue
+
+            delete_participants = self._parse_delete_participants_command(text)
+            if delete_participants:
+                self._handled_command_keys.add(key)
+                response = self._delete_participants_start_response(delete_participants)
+                result = await self._send_service_message(response)
+                self.logger(f"[Bot] Delete participants start response result: {result}")
+                delete_result = await self._delete_participants_by_command(delete_participants)
+                try:
+                    chat_result = await self._click_chat_button()
+                    self.logger(f"[Bot] Chat restored after delete participants command: {chat_result}")
+                    await self.page.wait_for_timeout(300)
+                except Exception as error:
+                    self.logger(f"[Bot] Could not restore chat after delete participants command: {error}")
+                final_response = self._delete_participants_result_response(delete_result)
+                result = await self._send_service_message(final_response)
+                self.logger(f"[Bot] Delete participants final response result: {result}")
+                continue
+
             if self.agenda_enabled:
                 add_question_text = self._parse_add_agenda_question_command(text)
                 if add_question_text is not None:
@@ -699,6 +796,13 @@ class ChatCommandsModule:
 
             participants = command["participants"]
             mode = command["mode"]
+            if self._confidential_mode is not None:
+                response = self._confidential_already_enabled_response(self._confidential_mode)
+                result = await self._send_service_message(response)
+                self.logger(f"[Bot] Confidential duplicate command response result: {result}")
+                continue
+
+            self._confidential_mode = mode
             response = self._confidential_response(participants, mode)
             result = await self._send_service_message(response)
             self.logger(f"[Bot] Confidential command response result: {result}")
@@ -706,6 +810,226 @@ class ChatCommandsModule:
             participants_result = await self._open_participants_panel_after_confidential_command(participants)
             self.logger(f"[Bot] Confidential participants panel result: {participants_result}")
             await self._notify_confidential_event("after_participant_cleanup", participants, mode)
+
+
+    def _parse_command_suffix(self, text: str, prefixes: tuple[str, ...]) -> str | None:
+        normalized = self._normalize_message_text(text)
+        lowered = normalized.lower()
+        for prefix in prefixes:
+            if lowered.startswith(prefix):
+                suffix = normalized[len(prefix):].strip()
+                return suffix or None
+        return None
+
+    def _parse_add_expected_participants_command(self, text: str) -> str | None:
+        return self._parse_command_suffix(text, self.ADD_EXPECTED_PARTICIPANTS_PREFIXES)
+
+    def _parse_remove_expected_participants_command(self, text: str) -> str | None:
+        return self._parse_command_suffix(text, self.REMOVE_EXPECTED_PARTICIPANTS_PREFIXES)
+
+    def _is_list_expected_participants_command(self, text: str) -> bool:
+        normalized = self._normalize_message_text(text).lower()
+        return normalized in self.LIST_EXPECTED_PARTICIPANTS_COMMANDS
+
+    def _parse_expected_participant_items(self, participants) -> list[dict]:
+        if participants is None:
+            return []
+        if isinstance(participants, list):
+            raw_value = participants
+        else:
+            normalized = self._normalize_message_text(participants)
+            has_explicit_separator = any(separator in normalized for separator in (",", ";", "\n", "\r"))
+            has_email = "@" in normalized
+            words = [word for word in normalized.split() if word]
+            if not has_explicit_separator and not has_email and len(words) > 2 and len(words) % 2 == 0:
+                raw_value = [" ".join(words[index:index + 2]) for index in range(0, len(words), 2)]
+            else:
+                raw_value = normalized
+        return ParticipantsSummaryBuilder(Path.cwd(), expected_participants=raw_value)._parse_expected_participants(raw_value)
+
+    @staticmethod
+    def _expected_participant_label(participant: dict) -> str:
+        name = str(participant.get("name") or "").strip()
+        email = str(participant.get("email") or "").strip()
+        return f"{name} <{email}>" if email else name
+
+    def _expected_participant_key(self, participant: dict) -> str:
+        return ParticipantsSummaryBuilder(Path.cwd())._name_key(participant.get("name"))
+
+    async def _notify_expected_participants_updated(self) -> None:
+        if self.expected_participants_event_handler is None:
+            return
+        try:
+            result = self.expected_participants_event_handler(list(self._expected_participants))
+            if hasattr(result, "__await__"):
+                await result
+        except Exception as error:
+            self.logger(f"[Bot] Expected participants event handler failed: {error}")
+
+    async def _add_expected_participants(self, participants: str) -> dict:
+        parsed = self._parse_expected_participant_items(participants)
+        by_key = {self._expected_participant_key(item): dict(item) for item in self._expected_participants}
+        added = []
+        updated = []
+        unchanged = []
+        for participant in parsed:
+            key = self._expected_participant_key(participant)
+            if not key:
+                continue
+            existing = by_key.get(key)
+            if existing is None:
+                by_key[key] = dict(participant)
+                added.append(self._expected_participant_label(participant))
+                continue
+            if participant.get("email") and participant.get("email") != existing.get("email"):
+                existing["email"] = participant.get("email")
+                by_key[key] = existing
+                updated.append(self._expected_participant_label(existing))
+            else:
+                unchanged.append(self._expected_participant_label(existing))
+        self._expected_participants = sorted(by_key.values(), key=lambda item: str(item.get("name") or "").lower())
+        await self._notify_expected_participants_updated()
+        return {"added": added, "updated": updated, "unchanged": unchanged, "current": list(self._expected_participants)}
+
+    async def _remove_expected_participants(self, participants: str) -> dict:
+        parsed = self._parse_expected_participant_items(participants)
+        remove_by_key = {self._expected_participant_key(item): item for item in parsed}
+        removed = []
+        kept = []
+        current_by_key = {self._expected_participant_key(item): item for item in self._expected_participants}
+        for key, item in current_by_key.items():
+            if key in remove_by_key:
+                removed.append(self._expected_participant_label(item))
+            else:
+                kept.append(item)
+        not_found = [
+            self._expected_participant_label(item)
+            for key, item in remove_by_key.items()
+            if key not in current_by_key
+        ]
+        self._expected_participants = sorted(kept, key=lambda item: str(item.get("name") or "").lower())
+        await self._notify_expected_participants_updated()
+        return {"removed": removed, "not_found": not_found, "current": list(self._expected_participants)}
+
+    def _expected_participants_list_response(self) -> str:
+        if not self._expected_participants:
+            return "\u041f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u044b\u0435 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438 \u043d\u0435 \u0437\u0430\u0434\u0430\u043d\u044b."
+        lines = ["\u041f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u044b\u0435 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438:"]
+        lines.extend(f"- {self._expected_participant_label(item)}" for item in self._expected_participants)
+        return "\n".join(lines)
+
+    def _expected_participants_update_response(self, result: dict, action: str) -> str:
+        parts = []
+        if action == "add":
+            if result.get("added"):
+                parts.append("\u0414\u043e\u0431\u0430\u0432\u0438\u043b \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u044b\u0445 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432: " + ", ".join(result["added"]) + ".")
+            if result.get("updated"):
+                parts.append("\u041e\u0431\u043d\u043e\u0432\u0438\u043b email: " + ", ".join(result["updated"]) + ".")
+            if result.get("unchanged"):
+                parts.append("\u0423\u0436\u0435 \u0431\u044b\u043b\u0438 \u0432 \u0441\u043f\u0438\u0441\u043a\u0435: " + ", ".join(result["unchanged"]) + ".")
+            return " ".join(parts) if parts else "\u041d\u0435 \u0441\u043c\u043e\u0433 \u043e\u0431\u043d\u043e\u0432\u0438\u0442\u044c \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u044b\u0445 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432."
+        if result.get("removed"):
+            parts.append("\u0423\u0431\u0440\u0430\u043b \u0438\u0437 \u0441\u043f\u0438\u0441\u043a\u0430 \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u044b\u0445 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432: " + ", ".join(result["removed"]) + ".")
+        if result.get("not_found"):
+            parts.append("\u041d\u0435 \u043d\u0430\u0448\u0435\u043b \u0432 \u0441\u043f\u0438\u0441\u043a\u0435: " + ", ".join(result["not_found"]) + ".")
+        return " ".join(parts) if parts else "\u041d\u0435 \u0441\u043c\u043e\u0433 \u043e\u0431\u043d\u043e\u0432\u0438\u0442\u044c \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u044b\u0445 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432 \u0434\u043b\u044f \u0443\u0434\u0430\u043b\u0435\u043d\u0438\u044f."
+
+
+    def _parse_clear_expected_participant_email_command(self, text: str) -> str | None:
+        return self._parse_command_suffix(text, self.CLEAR_EXPECTED_PARTICIPANT_EMAIL_PREFIXES)
+
+    def _parse_change_expected_participant_email_command(self, text: str) -> str | None:
+        return self._parse_command_suffix(text, self.CHANGE_EXPECTED_PARTICIPANT_EMAIL_PREFIXES)
+
+    def _expected_participants_by_key(self) -> dict:
+        return {self._expected_participant_key(item): dict(item) for item in self._expected_participants}
+
+    async def _clear_expected_participant_email(self, participants: str) -> dict:
+        parsed = self._parse_expected_participant_items(participants)
+        by_key = self._expected_participants_by_key()
+        cleared = []
+        already_empty = []
+        not_found = []
+        for participant in parsed:
+            key = self._expected_participant_key(participant)
+            item = by_key.get(key)
+            label = self._expected_participant_label(participant)
+            if not item:
+                not_found.append(label)
+                continue
+            current_label = self._expected_participant_label(item)
+            if item.get("email"):
+                item["email"] = None
+                by_key[key] = item
+                cleared.append(current_label)
+            else:
+                already_empty.append(current_label)
+        self._expected_participants = sorted(by_key.values(), key=lambda item: str(item.get("name") or "").lower())
+        if cleared:
+            await self._notify_expected_participants_updated()
+        return {"cleared": cleared, "already_empty": already_empty, "not_found": not_found, "current": list(self._expected_participants)}
+
+    async def _change_expected_participant_email(self, participant_text: str) -> dict:
+        parsed = self._parse_expected_participant_items(participant_text)
+        with_email = [item for item in parsed if item.get("email")]
+        if not with_email:
+            return {"invalid": True, "current": list(self._expected_participants)}
+        participant = with_email[0]
+        key = self._expected_participant_key(participant)
+        by_key = self._expected_participants_by_key()
+        existing = by_key.get(key)
+        if not existing:
+            return {"not_found": [self._expected_participant_label(participant)], "current": list(self._expected_participants)}
+        old_label = self._expected_participant_label(existing)
+        existing["email"] = participant.get("email")
+        by_key[key] = existing
+        self._expected_participants = sorted(by_key.values(), key=lambda item: str(item.get("name") or "").lower())
+        await self._notify_expected_participants_updated()
+        return {"changed": [self._expected_participant_label(existing)], "old": [old_label], "current": list(self._expected_participants)}
+
+    def _expected_participants_email_response(self, result: dict, action: str) -> str:
+        if result.get("invalid"):
+            return "\u041d\u0435 \u043d\u0430\u0448\u0435\u043b email. \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u0444\u043e\u0440\u043c\u0430\u0442: #\u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043f\u043e\u0447\u0442\u044b \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430 \u0418\u0432\u0430\u043d \u0421\u043b\u0430\u0432\u0438\u043d\u0441\u043a\u0438\u0439 - ivan@example.com"
+        parts = []
+        if action == "clear_email":
+            if result.get("cleared"):
+                parts.append("\u0423\u0434\u0430\u043b\u0438\u043b \u043f\u043e\u0447\u0442\u0443 \u0443 \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u044b\u0445 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432: " + ", ".join(result["cleared"]) + ".")
+            if result.get("already_empty"):
+                parts.append("\u041f\u043e\u0447\u0442\u0430 \u0443\u0436\u0435 \u043d\u0435 \u0443\u043a\u0430\u0437\u0430\u043d\u0430: " + ", ".join(result["already_empty"]) + ".")
+        if action == "change_email" and result.get("changed"):
+            parts.append("\u041e\u0431\u043d\u043e\u0432\u0438\u043b \u043f\u043e\u0447\u0442\u0443 \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430: " + ", ".join(result["changed"]) + ".")
+        if result.get("not_found"):
+            parts.append("\u041d\u0435 \u043d\u0430\u0448\u0435\u043b \u0432 \u0441\u043f\u0438\u0441\u043a\u0435 \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u044b\u0445 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432: " + ", ".join(result["not_found"]) + ".")
+        return " ".join(parts) if parts else "\u041d\u0435 \u0441\u043c\u043e\u0433 \u0438\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u043f\u043e\u0447\u0442\u0443 \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430."
+
+
+    def _parse_delete_participants_command(self, text: str) -> str | None:
+        normalized = self._normalize_message_text(text)
+        lowered = normalized.lower()
+        for prefix in self.DELETE_PARTICIPANTS_PREFIXES:
+            if lowered.startswith(prefix):
+                participants = normalized[len(prefix):].strip()
+                return participants or None
+        return None
+
+    def _delete_participants_start_response(self, participants: str) -> str:
+        names = self._parse_participant_name_items(participants)
+        if names:
+            return "\u0423\u0434\u0430\u043b\u044f\u044e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432: " + ", ".join(names) + "."
+        return "\u0423\u0434\u0430\u043b\u044f\u044e \u0443\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0445 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432."
+
+    def _delete_participants_result_response(self, result: dict) -> str:
+        removed = result.get("removed") or []
+        not_found = result.get("not_found") or []
+        failed = result.get("failed") or []
+        parts = []
+        if removed:
+            parts.append("\u0423\u0434\u0430\u043b\u0435\u043d\u044b: " + ", ".join(removed) + ".")
+        if not_found:
+            parts.append("\u0423\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u044e\u0442 \u0432 \u0437\u0432\u043e\u043d\u043a\u0435: " + ", ".join(not_found) + ".")
+        if failed:
+            parts.append("\u041d\u0435 \u0441\u043c\u043e\u0433 \u0443\u0434\u0430\u043b\u0438\u0442\u044c: " + ", ".join(failed) + ".")
+        return " ".join(parts) if parts else "\u0423\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0435 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u044e\u0442 \u0432 \u0437\u0432\u043e\u043d\u043a\u0435."
 
 
     def _is_command_description_command(self, text: str) -> bool:
@@ -844,6 +1168,13 @@ class ChatCommandsModule:
             return "Повестка завершена."
         return ""
 
+    @staticmethod
+    def _confidential_already_enabled_response(mode: str) -> str:
+        if mode == "no_recording":
+            return "\u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u044b\u0439 \u0440\u0435\u0436\u0438\u043c \u0431\u0435\u0437 \u0437\u0430\u043f\u0438\u0441\u0438 \u0443\u0436\u0435 \u0432\u043a\u043b\u044e\u0447\u0435\u043d."
+        return "\u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u044b\u0439 \u0440\u0435\u0436\u0438\u043c \u0443\u0436\u0435 \u0432\u043a\u043b\u044e\u0447\u0435\u043d."
+
+
     def _agenda_items_response(self, result: dict) -> str:
         items = result.get("items") or []
         kind = result.get("kind")
@@ -957,6 +1288,141 @@ class ChatCommandsModule:
         with action_debug_path.open("a", encoding="utf-8") as debug_file:
             debug_file.write(json.dumps(action_result, ensure_ascii=False) + "\n")
         return json.dumps(action_result, ensure_ascii=False)
+
+
+    async def _visible_participant_names(self) -> list[str]:
+        rows = self.page.locator('div[class*="Participant_"]')
+        row_count = await rows.count()
+        bot_name_markers = (
+            "\u0412\u0435\u0440\u0442\u0435\u0440 \u0420\u043e\u0431\u043e\u0442",
+            "Telemost Bot",
+        )
+        names = []
+        seen = set()
+        for index in range(row_count):
+            row = rows.nth(index)
+            try:
+                if not await row.is_visible(timeout=300):
+                    continue
+                row_text = " ".join((await row.inner_text(timeout=500)).split())
+                if any(marker.lower() in row_text.lower() for marker in bot_name_markers):
+                    continue
+                display_name = await self._participant_display_name(row)
+                participant_name = display_name or row_text
+                normalized = self._normalize_participant_name(participant_name)
+                if normalized and normalized not in seen:
+                    seen.add(normalized)
+                    names.append(participant_name)
+            except Exception:
+                continue
+        return names
+
+
+    async def _delete_participants_by_command(self, participants: str) -> dict:
+        requested_display_names = self._parse_participant_name_items(participants)
+        click_result = await self._click_participants_button()
+        await self.page.wait_for_timeout(500)
+        visible_participants = await self._visible_participant_names()
+        visible_by_normalized = {
+            self._normalize_participant_name(name): name
+            for name in visible_participants
+        }
+        target_display_names = []
+        not_found_display_names = []
+        for name in requested_display_names:
+            normalized = self._normalize_participant_name(name)
+            if normalized in visible_by_normalized:
+                target_display_names.append(visible_by_normalized[normalized])
+            else:
+                not_found_display_names.append(name)
+        target_names = {self._normalize_participant_name(name) for name in target_display_names if self._normalize_participant_name(name)}
+
+        action_result = {
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "bot_id": self.bot_id,
+            "target_names": sorted(target_names),
+            "target_display_names": target_display_names,
+            "requested_display_names": requested_display_names,
+            "visible_participants": visible_participants,
+            "click_result": click_result,
+            "removed": [],
+            "failed": [],
+            "not_found": list(not_found_display_names),
+            "attempts": [],
+            "stopped_at": None,
+        }
+
+        if not target_names:
+            action_result["stopped_at"] = "no requested participants visible"
+            action_debug_path = Path(f"chat_commands_action_debug_{self.bot_id}.jsonl")
+            with action_debug_path.open("a", encoding="utf-8") as debug_file:
+                debug_file.write(json.dumps(action_result, ensure_ascii=False) + "\n")
+            return action_result
+
+        pending = set(target_names)
+        max_removals = int(os.getenv("TELEMOST_CHAT_COMMANDS_MAX_REMOVALS", "20"))
+        for attempt in range(1, max_removals + 1):
+            if not pending:
+                action_result["stopped_at"] = "all targets removed"
+                break
+
+            menu_result = await self._click_participant_actions_button(target_names=pending)
+            await self.page.wait_for_timeout(500)
+            if (
+                menu_result.startswith("no target participants found")
+                or menu_result.startswith("participant actions button not found")
+                or menu_result.startswith("participant actions menu not opened")
+            ):
+                action_result["stopped_at"] = menu_result
+                break
+
+            remove_result = await self._click_remove_from_meeting_option()
+            await self.page.wait_for_timeout(700)
+            confirm_result = await self._click_confirm_remove_from_meeting_button()
+            await self.page.wait_for_timeout(1200)
+
+            removed_name = self._participant_name_from_menu_result(menu_result)
+            normalized_removed_name = self._normalize_participant_name(removed_name)
+            attempt_result = {
+                "attempt": attempt,
+                "participant": removed_name,
+                "menu_result": menu_result,
+                "remove_result": remove_result,
+                "confirm_result": confirm_result,
+            }
+            action_result["attempts"].append(attempt_result)
+
+            if remove_result.startswith("clicked remove") and confirm_result.startswith("clicked confirm remove"):
+                if normalized_removed_name:
+                    pending.discard(normalized_removed_name)
+                    action_result["removed"].append(removed_name)
+                else:
+                    action_result["removed"].append("unknown participant")
+            else:
+                failed_label = removed_name or menu_result
+                action_result["failed"].append(failed_label)
+                action_result["stopped_at"] = "removal failed"
+                break
+
+            await self.page.wait_for_timeout(800)
+        else:
+            action_result["stopped_at"] = f"max removals reached: {max_removals}"
+
+        if pending:
+            display_by_normalized = {
+                self._normalize_participant_name(name): name
+                for name in target_display_names
+            }
+            action_result["not_found"].extend(
+                display_by_normalized.get(name, name)
+                for name in sorted(pending)
+            )
+
+        action_debug_path = Path(f"chat_commands_action_debug_{self.bot_id}.jsonl")
+        with action_debug_path.open("a", encoding="utf-8") as debug_file:
+            debug_file.write(json.dumps(action_result, ensure_ascii=False) + "\n")
+        return action_result
+
 
     async def _click_confirm_remove_from_meeting_button(self) -> str:
         result = await self.page.evaluate("""() => {
@@ -1101,9 +1567,10 @@ class ChatCommandsModule:
         }""")
         return result
 
-    async def _click_participant_actions_button(self, protected_names: set[str] | None = None) -> str:
-        """Open moderation menu for the next participant outside the protected list."""
+    async def _click_participant_actions_button(self, protected_names: set[str] | None = None, target_names: set[str] | None = None) -> str:
+        """Open moderation menu for the next participant matching moderation filters."""
         protected_names = protected_names or set()
+        target_names = target_names or set()
         rows = self.page.locator('div[class*="Participant_"]')
         row_count = await rows.count()
         bot_name_markers = (
@@ -1132,6 +1599,9 @@ class ChatCommandsModule:
                 if normalized_name in protected_names:
                     skipped.append(f"protected:{participant_name}")
                     continue
+                if target_names and normalized_name not in target_names:
+                    skipped.append(f"not-target:{participant_name}")
+                    continue
 
                 # Telemost renders the moderation "more" button lazily: it may appear
                 # only after the participant row is hovered. Check it after hover.
@@ -1156,6 +1626,8 @@ class ChatCommandsModule:
 
         if not candidates:
             details = "; ".join(skipped[-8:])
+            if target_names:
+                return f"no target participants found; targets={sorted(target_names)}; skipped={details}"
             return f"no removable participants found; protected={sorted(protected_names)}; skipped={details}"
 
         async def popover_is_open() -> bool:
@@ -1277,6 +1749,42 @@ class ChatCommandsModule:
         except Exception:
             pass
         return ""
+
+    def _parse_participant_name_items(self, participants: str) -> list[str]:
+        normalized = self._normalize_message_text(participants)
+        if not normalized:
+            return []
+
+        separators = [",", ";", "\n"]
+        parts = [normalized]
+        for separator in separators:
+            next_parts = []
+            for part in parts:
+                next_parts.extend(piece.strip() for piece in part.split(separator))
+            parts = next_parts
+
+        if len(parts) == 1:
+            words = [word for word in parts[0].split() if word]
+            if len(words) > 2 and len(words) % 2 == 0:
+                parts = [" ".join(words[index:index + 2]) for index in range(0, len(words), 2)]
+
+        result = []
+        seen = set()
+        for part in parts:
+            clean = " ".join(part.split()).strip()
+            key = self._normalize_participant_name(clean)
+            if clean and key and key not in seen:
+                seen.add(key)
+                result.append(clean)
+        return result
+
+    def _participant_name_from_menu_result(self, menu_result: str) -> str:
+        marker = ": "
+        suffix = "; popover_opened=True"
+        if marker in menu_result and suffix in menu_result:
+            return menu_result.rsplit(marker, 1)[-1].split(suffix, 1)[0].strip()
+        return ""
+
 
     def _parse_protected_participant_names(self, participants: str) -> set[str]:
         normalized = self._normalize_message_text(participants)

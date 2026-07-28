@@ -252,6 +252,136 @@ def write_remote_job_json(audio_path: Path, job_id: str, payload: dict) -> Path:
     return output_path
 
 
+def _participant_name(entry: dict) -> str:
+    participant = entry.get("participant") if isinstance(entry.get("participant"), dict) else {}
+    return str(
+        participant.get("display_name")
+        or participant.get("name")
+        or entry.get("display_name")
+        or entry.get("name")
+        or "Unknown participant"
+    ).strip()
+
+
+def _participant_email(entry: dict) -> str | None:
+    participant = entry.get("participant") if isinstance(entry.get("participant"), dict) else {}
+    profile = entry.get("profile") if isinstance(entry.get("profile"), dict) else {}
+    email = participant.get("email") or profile.get("email") or entry.get("email")
+    if not email:
+        return None
+    normalized = str(email).strip()
+    return normalized or None
+
+
+def _readiness_from_payload(payload: dict | None) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    options = payload.get("options")
+    if not isinstance(options, dict):
+        return None
+    readiness = options.get("participant_readiness")
+    return readiness if isinstance(readiness, dict) else None
+
+
+def _readiness_from_status(status_data: dict) -> dict | None:
+    for key in ("remote_status_response", "remote_submit_response"):
+        readiness = _readiness_from_payload(status_data.get(key))
+        if readiness:
+            return readiness
+    return None
+
+
+def write_voice_profile_readiness(audio_path: Path, status_data: dict) -> Path | None:
+    readiness = _readiness_from_status(status_data)
+    if not readiness:
+        return None
+
+    summary = readiness.get("summary") if isinstance(readiness.get("summary"), dict) else {}
+    participants = readiness.get("participants") if isinstance(readiness.get("participants"), list) else []
+    groups = {"ready": [], "incomplete": [], "missing": [], "other": []}
+
+    for entry in participants:
+        if not isinstance(entry, dict):
+            continue
+        status = str(entry.get("status") or "other").strip().lower()
+        if status not in groups:
+            status = "other"
+        groups[status].append(entry)
+
+    def format_entry(entry: dict) -> str:
+        name = _participant_name(entry)
+        email = _participant_email(entry)
+        label = f"{name} <{email}>" if email else name
+        action = entry.get("action")
+        issues = entry.get("issues") if isinstance(entry.get("issues"), list) else []
+        details = []
+        if action:
+            details.append(f"action: {action}")
+        if issues:
+            details.append("issues: " + ", ".join(str(item) for item in issues))
+        return f"- {label}" + (f" ({'; '.join(details)})" if details else "")
+
+    lines = [
+        "Voice profile readiness",
+        "",
+        f"Total participants: {summary.get('participants_count', len(participants))}",
+        f"Ready: {summary.get('ready_count', len(groups['ready']))}",
+        f"Need more voice samples: {summary.get('incomplete_count', len(groups['incomplete']))}",
+        f"Need profile creation: {summary.get('missing_count', len(groups['missing']))}",
+        "",
+        "Ready:",
+    ]
+    lines.extend(format_entry(entry) for entry in groups["ready"])
+    if not groups["ready"]:
+        lines.append("- none")
+
+    lines.extend(["", "Need more voice samples:"])
+    lines.extend(format_entry(entry) for entry in groups["incomplete"])
+    if not groups["incomplete"]:
+        lines.append("- none")
+
+    lines.extend(["", "Need profile creation:"])
+    lines.extend(format_entry(entry) for entry in groups["missing"])
+    if not groups["missing"]:
+        lines.append("- none")
+
+    if groups["other"]:
+        lines.extend(["", "Other statuses:"])
+        lines.extend(format_entry(entry) for entry in groups["other"])
+
+    lines.extend(["", f"Updated at: {datetime.now(timezone.utc).isoformat()}"])
+    output_path = audio_path.parent / "voice_profile_readiness.txt"
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return output_path
+
+
+def _remote_error_message(error: object) -> str:
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("detail") or error)
+    return str(error or "")
+
+
+def _is_no_turn_level_transcript(result: dict) -> bool:
+    message = _remote_error_message(result.get("error")).lower()
+    return "no turn-level transcript" in message or "returned no turn-level transcript" in message
+
+
+def write_empty_remote_transcript(audio_path: Path, job_id: str, result: dict) -> Path:
+    transcript_path = remote_transcript_path(audio_path, f"{job_id}_no_speech")
+    lines = [
+        "Transcript was not created: the service did not detect speech segments in the recording.",
+        "",
+        "This is not a voice profile readiness error. The transcription provider returned empty diarization, wordLevelTranscription and turnLevelTranscription lists.",
+        "",
+        f"Remote job: {job_id}",
+        f"Audio: {audio_path}",
+        f"Processed at: {datetime.now(timezone.utc).isoformat()}",
+    ]
+    transcript_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_remote_job_json(audio_path, job_id, result)
+    return transcript_path
+
+
 def participants_for_audio(audio_path: Path) -> list[dict]:
     snapshot_path = audio_path.parent / "participants_snapshot.json"
     names = load_snapshot_participant_names(snapshot_path)
@@ -297,6 +427,7 @@ async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: st
             data["remote_submit_response"] = payload
             data["transcription_backend"] = "remote"
             data["checked_at"] = datetime.now(timezone.utc).isoformat()
+            write_voice_profile_readiness(audio_path, data)
             data["completed_at"] = None
             data["transcript_path"] = None
             data["error"] = None
@@ -337,6 +468,38 @@ async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: st
         print(f"[TranscriptionMonitor] Failed {meeting_dir.name}: {error}")
 
 
+async def complete_no_speech_remote_failure(meeting_dir: Path, status_data: dict) -> bool:
+    if status_backend(status_data) != "remote":
+        return False
+    if str(status_data.get("status") or "").lower() != "failed":
+        return False
+    result = status_data.get("remote_status_response")
+    if not isinstance(result, dict) or not _is_no_turn_level_transcript(result):
+        return False
+    job_id = str(status_data.get("job_id") or "").strip()
+    if not job_id:
+        return False
+
+    status_file = meeting_dir / "transcription_status.json"
+    data = read_status(status_file) or status_data
+    audio_path = Path(data["audio_path"])
+    write_voice_profile_readiness(audio_path, data)
+    transcript_path = write_empty_remote_transcript(audio_path, job_id, result)
+    data["status"] = "completed"
+    data["completed_at"] = datetime.now(timezone.utc).isoformat()
+    data["transcript_path"] = str(transcript_path)
+    data["empty_transcript"] = True
+    data["error"] = None
+    data["warning"] = _remote_error_message(result.get("error"))
+    write_status(status_file, data)
+    print(
+        f"[TranscriptionMonitor] Recovered no-speech remote failure for {meeting_dir.name}; "
+        f"saved diagnostic transcript, job_id={job_id}"
+    )
+    await finalize_meeting_folder(_meeting_dir_for_audio(audio_path))
+    return True
+
+
 async def refresh_pending_status(meeting_dir: Path, status_data: dict, api_key: str | None) -> None:
     job_id = status_data.get("job_id")
     if not job_id:
@@ -356,9 +519,10 @@ async def refresh_pending_status(meeting_dir: Path, status_data: dict, api_key: 
         data["remote_status_response"] = result
         data["checked_at"] = datetime.now(timezone.utc).isoformat()
         data["transcription_backend"] = "remote"
+        audio_path = Path(data["audio_path"])
+        write_voice_profile_readiness(audio_path, data)
 
         if job_status == "succeeded":
-            audio_path = Path(data["audio_path"])
             transcript_path = remote_transcript_path(audio_path, str(job_id))
             await asyncio.to_thread(adapter.download_transcript, str(job_id), transcript_path)
             write_remote_job_json(audio_path, str(job_id), result)
@@ -370,11 +534,26 @@ async def refresh_pending_status(meeting_dir: Path, status_data: dict, api_key: 
             print(f"[TranscriptionMonitor] Remote transcription completed for {meeting_dir.name}, job_id={job_id}")
             await finalize_meeting_folder(_meeting_dir_for_audio(audio_path))
         elif job_status == "failed":
-            data["status"] = "failed"
-            data["completed_at"] = datetime.now(timezone.utc).isoformat()
-            data["error"] = result.get("error") or "Remote transcription failed"
-            write_status(status_file, data)
-            print(f"[TranscriptionMonitor] Remote job failed for {meeting_dir.name}: {data['error']}")
+            if _is_no_turn_level_transcript(result):
+                transcript_path = write_empty_remote_transcript(audio_path, str(job_id), result)
+                data["status"] = "completed"
+                data["completed_at"] = datetime.now(timezone.utc).isoformat()
+                data["transcript_path"] = str(transcript_path)
+                data["empty_transcript"] = True
+                data["error"] = None
+                data["warning"] = _remote_error_message(result.get("error"))
+                write_status(status_file, data)
+                print(
+                    f"[TranscriptionMonitor] Remote job produced no transcript for {meeting_dir.name}; "
+                    f"saved diagnostic transcript, job_id={job_id}"
+                )
+                await finalize_meeting_folder(_meeting_dir_for_audio(audio_path))
+            else:
+                data["status"] = "failed"
+                data["completed_at"] = datetime.now(timezone.utc).isoformat()
+                data["error"] = result.get("error") or "Remote transcription failed"
+                write_status(status_file, data)
+                print(f"[TranscriptionMonitor] Remote job failed for {meeting_dir.name}: {data['error']}")
         else:
             data["status"] = "processing"
             write_status(status_file, data)
@@ -475,6 +654,11 @@ async def monitor_loop() -> None:
                 status_data = requeue_stale_processing_without_job(status_file, status_data)
                 status = status_data.get("status")
                 print(f"[TranscriptionMonitor] Requeued stale processing transcription: {meeting_dir}")
+
+            if key not in running and status == "failed":
+                recovered = await complete_no_speech_remote_failure(meeting_dir, status_data)
+                if recovered:
+                    continue
 
             if key not in running and retryable_failed_status(status_data):
                 status_data = requeue_failed_transcription(status_file, status_data)
