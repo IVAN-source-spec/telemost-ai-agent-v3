@@ -15,6 +15,7 @@ from core.browser_bot.chat_commands import ChatCommandsModule
 from core.browser_bot.participants_snapshot import ParticipantsSnapshotModule
 from core.browser_bot.participants_summary import ParticipantsSummaryBuilder
 from core.browser_bot.agenda_tracker import AgendaTracker
+from core.browser_bot.voice_stream import VoiceCommandsAudioClient
 
 DEFAULT_STORAGE_STATE_PATH = "data/auth/yandex-session.json"
 DEFAULT_COOKIES_PATH = "data/auth/cookies.json"
@@ -63,6 +64,16 @@ class TelemostBot:
         self.reconnect_events = []
         self.auth_ok = False
         self._last_valid_participant_count = 0
+        self.chat_commands_module = None
+        self.voice_commands_client = None
+        self.voice_service_status = "disabled"
+        self.voice_service_session_id = None
+        self.voice_service_vad_enabled = False
+        self.voice_command_catalog = None
+        self._voice_status_loop = None
+        self._voice_status_chat_messages_sent: set[str] = set()
+        self._pending_voice_status_chat_messages: list[tuple[str, str]] = []
+        self._pending_voice_command_payloads: list[dict] = []
         self.auth_state_path = Path(
             auth_state_path
             or os.getenv("TELEMOST_AUTH_STATE_PATH", DEFAULT_STORAGE_STATE_PATH)
@@ -526,7 +537,10 @@ class TelemostBot:
                 expected_participants=self.expected_participants_text,
                 expected_participants_event_handler=self._handle_expected_participants_event,
             )
+            self.chat_commands_module = module
             await module.run_probe()
+            await self._flush_pending_voice_status_chat_messages()
+            await self._flush_pending_voice_commands()
         except Exception as error:
             self._print(f"[Bot] Chat commands probe failed: {error}")
 
@@ -638,7 +652,27 @@ class TelemostBot:
             return
         self.recording_audio_path = target_path
         self.recording_audio_path.parent.mkdir(parents=True, exist_ok=True)
-        self.recorder = AudioRecorder(log_prefix=f"[AudioRecorder:{self.bot_id}]")
+        on_audio_chunk = None
+        if VoiceCommandsAudioClient.enabled():
+            try:
+                self._voice_status_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._voice_status_loop = None
+            self.voice_service_status = "connecting"
+            self.voice_commands_client = VoiceCommandsAudioClient(
+                node_id=os.getenv("BOT_NODE_ID"),
+                bot_id=self.bot_id,
+                meeting_id=self.session_id,
+                meeting_title=self.meeting_title,
+                sample_rate=44100,
+                channels=2,
+                chunk_size=1024,
+                event_handler=self._handle_voice_service_payload_from_thread,
+            )
+            self.voice_commands_client.start()
+            on_audio_chunk = self.voice_commands_client.on_audio_chunk
+            self._print("[Bot] Voice command audio stream started")
+        self.recorder = AudioRecorder(log_prefix=f"[AudioRecorder:{self.bot_id}]", on_audio_chunk=on_audio_chunk)
         self.recorder.start()
         self._print(f"[Bot] Audio recording started: {self.recording_audio_path}")
 
@@ -656,8 +690,243 @@ class TelemostBot:
         self.recorder.save(str(filename))
         self.recorder.close()
         self.recorder = None
+        if self.voice_commands_client is not None:
+            self.voice_commands_client.stop()
+            self.voice_commands_client = None
         self.recording_audio_path = None
         self._print(f"[Bot] Audio recording saved to {filename}")
+
+    def _handle_voice_service_payload_from_thread(self, payload: dict) -> None:
+        loop = self._voice_status_loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._handle_voice_service_payload(payload), loop)
+        except Exception:
+            pass
+
+    async def _handle_voice_service_payload(self, payload: dict) -> None:
+        payload_type = payload.get("type")
+        if payload_type == "voice_service_connected":
+            self.voice_service_status = "connected"
+            self.voice_service_session_id = payload.get("session_id")
+            vad = payload.get("vad") or {}
+            self.voice_service_vad_enabled = bool(vad.get("enabled"))
+            self._remember_voice_command_catalog(payload)
+            self._write_voice_status_debug("voice_service_connected", payload)
+            self._print("[Bot] Voice command service connected")
+        elif payload_type == "start_accepted":
+            self.voice_service_status = "streaming"
+            self.voice_service_session_id = payload.get("session_id")
+            self._remember_voice_command_catalog(payload)
+            self._write_voice_status_debug("voice_service_streaming", payload)
+            self._print("[Bot] Voice command audio stream accepted")
+        elif payload_type == "vad_event":
+            self._write_voice_status_debug(f"vad_{payload.get('event') or 'event'}", payload)
+        elif payload_type == "session_stopped":
+            self.voice_service_status = "stopped"
+            self._write_voice_status_debug("voice_service_stopped", payload)
+        elif payload_type == "voice_agent_ready":
+            self.voice_service_status = "agent_ready"
+            self._remember_voice_command_catalog(payload)
+            self._write_voice_status_debug("voice_agent_ready", payload)
+            await self._send_voice_status_chat_message(
+                "voice_agent_ready",
+                self._format_voice_command_catalog_message(payload),
+            )
+        elif payload_type == "voice_agent_unavailable":
+            self.voice_service_status = "agent_unavailable"
+            self._write_voice_status_debug("voice_agent_unavailable", payload)
+        elif payload_type == "voice_agent_disconnected":
+            self.voice_service_status = "agent_reconnecting"
+            self._write_voice_status_debug("voice_agent_disconnected", payload)
+        elif payload_type == "voice_agent_reconnect_attempt":
+            self.voice_service_status = "agent_reconnecting"
+            self._write_voice_status_debug("voice_agent_reconnect_attempt", payload)
+        elif payload_type in {"voice_agent_recovered", "voice_agent_reconnect_succeeded"}:
+            self.voice_service_status = "agent_ready"
+            self._remember_voice_command_catalog(payload)
+            self._write_voice_status_debug(payload_type, payload)
+            if payload_type == "voice_agent_recovered":
+                await self._send_voice_status_chat_message(
+                    "voice_agent_recovered",
+                    "\u0413\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u0439 \u043a\u0430\u043d\u0430\u043b \u0432\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d. \u0413\u043e\u043b\u043e\u0441\u043e\u0432\u044b\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b \u0441\u043d\u043e\u0432\u0430 \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b.",
+                )
+        elif payload_type in {"voice_command", "voice_command_detected", "command", "command_detected"}:
+            await self._handle_voice_command_payload(payload)
+        elif payload_type == "voice_service_unavailable":
+            self.voice_service_status = "unavailable"
+            self._write_voice_status_debug("voice_service_unavailable", payload)
+            self._print(f"[Bot] Voice command service unavailable: {payload.get('error')}")
+            await self._send_voice_status_chat_message(
+                "voice_service_unavailable",
+                "\u0413\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u0439 \u043a\u0430\u043d\u0430\u043b \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d. \u041a\u043e\u043c\u0430\u043d\u0434\u044b \u0432 \u0447\u0430\u0442\u0435 \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0442 \u0448\u0442\u0430\u0442\u043d\u043e.",
+            )
+
+    def _remember_voice_command_catalog(self, payload: dict) -> None:
+        catalog = payload.get("command_catalog")
+        if isinstance(catalog, dict):
+            self.voice_command_catalog = catalog
+            self._write_voice_status_debug("voice_commands_catalog_loaded", catalog)
+            return
+        commands = payload.get("commands")
+        if isinstance(commands, list):
+            self.voice_command_catalog = {"prefix": "\u0420\u043e\u0431\u043e\u0442 \u0412\u0435\u0440\u0442\u0435\u0440", "commands": commands}
+            self._write_voice_status_debug("voice_commands_catalog_loaded", self.voice_command_catalog)
+
+    def _format_voice_command_catalog_message(self, payload: dict) -> str:
+        catalog = payload.get("command_catalog") if isinstance(payload.get("command_catalog"), dict) else self.voice_command_catalog
+        commands = []
+        if isinstance(catalog, dict) and isinstance(catalog.get("commands"), list):
+            commands = [str(command).strip() for command in catalog.get("commands") if str(command).strip()]
+        elif isinstance(payload.get("commands"), list):
+            commands = [str(command).strip() for command in payload.get("commands") if str(command).strip()]
+
+        if not commands:
+            return "\u0413\u043e\u043b\u043e\u0441\u043e\u0432\u044b\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b.\n\u0421\u043a\u0430\u0436\u0438\u0442\u0435: \u0420\u043e\u0431\u043e\u0442 \u0412\u0435\u0440\u0442\u0435\u0440, \u0437\u0430\u0442\u0435\u043c \u043a\u043e\u043c\u0430\u043d\u0434\u0443."
+
+        prefix = "\u0420\u043e\u0431\u043e\u0442 \u0412\u0435\u0440\u0442\u0435\u0440"
+        if isinstance(catalog, dict) and isinstance(catalog.get("prefix"), str) and catalog.get("prefix").strip():
+            prefix = catalog["prefix"].strip()
+
+        lines = [
+            "\u0413\u043e\u043b\u043e\u0441\u043e\u0432\u044b\u0435 \u043a\u043e\u043c\u0430\u043d\u0434\u044b \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b.",
+            f"\u0421\u043a\u0430\u0436\u0438\u0442\u0435: {prefix}, \u0437\u0430\u0442\u0435\u043c \u043e\u0434\u043d\u0443 \u0438\u0437 \u043a\u043e\u043c\u0430\u043d\u0434:",
+        ]
+        lines.extend(commands)
+        return "\n".join(lines)
+
+    async def _handle_voice_command_payload(self, payload: dict) -> None:
+        command = self._extract_voice_command_text(payload)
+        if not command:
+            self._write_voice_status_debug("voice_command_ignored", {"reason": "empty command", "payload": payload})
+            return
+        command = command.strip()
+        if command and not command.startswith("#"):
+            command = f"#{command}"
+
+        command_id = str(
+            payload.get("command_id")
+            or payload.get("id")
+            or payload.get("received_at")
+            or datetime.now(timezone.utc).isoformat()
+        )
+
+        if self.chat_commands_module is None:
+            pending_payload = dict(payload)
+            pending_payload["command"] = command
+            pending_payload["command_id"] = command_id
+            self._pending_voice_command_payloads.append(pending_payload)
+            self._write_voice_status_debug("voice_command_pending", {"command": command, "command_id": command_id})
+            return
+
+        handled = await self.chat_commands_module.handle_command_text(
+            command,
+            source="voice",
+            command_id=command_id,
+        )
+        self._write_voice_status_debug(
+            "voice_command_handled" if handled else "voice_command_ignored",
+            {"command": command, "command_id": command_id, "payload": payload},
+        )
+
+    def _extract_voice_command_text(self, payload: dict) -> str:
+        for key in ("command", "normalized_command", "text"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    async def _flush_pending_voice_commands(self) -> None:
+        pending = list(self._pending_voice_command_payloads)
+        self._pending_voice_command_payloads.clear()
+        for payload in pending:
+            await self._handle_voice_command_payload(payload)
+
+    async def _send_voice_status_chat_message(self, event_key: str, message: str) -> None:
+        if event_key in self._voice_status_chat_messages_sent:
+            return
+        if self.chat_commands_module is None:
+            pending = (event_key, message)
+            if pending not in self._pending_voice_status_chat_messages:
+                self._pending_voice_status_chat_messages.append(pending)
+                self._write_voice_status_debug("voice_status_chat_message_pending", {"type": event_key, "message": message})
+            return
+        try:
+            # The chat iframe may silently drop a message sent immediately after the startup text.
+            # Treat the message as sent only after it appears in the visible chat list.
+            await self.page.wait_for_timeout(1500)
+            last_result = "not attempted"
+            for attempt in range(1, 4):
+                result = await self.chat_commands_module._send_service_message(message)
+                last_result = result
+                await self.page.wait_for_timeout(1200)
+                if await self._voice_status_chat_message_is_visible(message):
+                    self._voice_status_chat_messages_sent.add(event_key)
+                    self._write_voice_status_debug("voice_status_chat_message_sent", {
+                        "type": event_key,
+                        "message": message,
+                        "result": result,
+                        "attempt": attempt,
+                        "verified_visible": True,
+                    })
+                    self._print(f"[Bot] Voice status chat message result: {result} (verified)")
+                    return
+                self._write_voice_status_debug("voice_status_chat_message_not_visible", {
+                    "type": event_key,
+                    "message": message,
+                    "result": result,
+                    "attempt": attempt,
+                })
+                await self.page.wait_for_timeout(1500)
+            self._write_voice_status_debug("voice_status_chat_message_failed", {
+                "type": event_key,
+                "message": message,
+                "error": "message was not visible after retries",
+                "last_result": last_result,
+            })
+            self._print("[Bot] Voice status chat message was not visible after retries")
+        except Exception as error:
+            self._write_voice_status_debug("voice_status_chat_message_failed", {"type": event_key, "message": message, "error": str(error)})
+            self._print(f"[Bot] Voice status chat message failed: {error}")
+
+    async def _voice_status_chat_message_is_visible(self, message: str) -> bool:
+        if self.chat_commands_module is None:
+            return False
+        expected = self.chat_commands_module._normalize_message_text(message)
+        try:
+            messages = await self.chat_commands_module._read_visible_chat_messages()
+        except Exception as error:
+            self._write_voice_status_debug("voice_status_chat_message_verify_failed", {"message": message, "error": str(error)})
+            return False
+        for item in messages:
+            text = self.chat_commands_module._normalize_message_text(str(item.get("text") or ""))
+            if text == expected:
+                return True
+        return False
+
+    async def _flush_pending_voice_status_chat_messages(self) -> None:
+        pending = list(self._pending_voice_status_chat_messages)
+        self._pending_voice_status_chat_messages.clear()
+        for event_key, message in pending:
+            await self._send_voice_status_chat_message(event_key, message)
+
+    def _write_voice_status_debug(self, event: str, payload: dict) -> None:
+        debug_path = Path(os.getenv("VOICE_COMMANDS_DEBUG_FILE", f"voice_commands_debug_{self.bot_id}.jsonl"))
+        record = {
+            "written_at": datetime.now(timezone.utc).isoformat(),
+            "bot_id": self.bot_id,
+            "meeting_id": self.session_id,
+            "meeting_title": self.meeting_title,
+            "event": event,
+            "voice_service_status": self.voice_service_status,
+            "payload": payload,
+        }
+        try:
+            with debug_path.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     async def _handle_confidential_mode_event(self, stage: str, participants: str, mode: str = "recording") -> None:
         if stage == "exit_requested":

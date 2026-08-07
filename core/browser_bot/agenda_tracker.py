@@ -51,12 +51,13 @@ class AgendaTracker:
             return None
         numbers = [int(part) for part in parts]
         if len(numbers) == 1:
-            return numbers[0]
+            minutes = numbers[0]
+            return minutes * 60
         if len(numbers) == 2:
-            minutes, seconds = numbers
-            if seconds >= 60:
+            hours, minutes = numbers
+            if minutes >= 60:
                 return None
-            return minutes * 60 + seconds
+            return hours * 3600 + minutes * 60
         hours, minutes, seconds = numbers
         if minutes >= 60 or seconds >= 60:
             return None
@@ -66,8 +67,9 @@ class AgendaTracker:
     def _split_title_and_planned_seconds(cls, title: str) -> tuple[str, int | None, bool]:
         if cls.PLANNED_TIME_SEPARATOR not in title:
             return title, None, False
-        name, raw_time = title.rsplit(cls.PLANNED_TIME_SEPARATOR, 1)
+        name, raw_time_and_comment = title.rsplit(cls.PLANNED_TIME_SEPARATOR, 1)
         clean_name = " ".join(name.strip().split())
+        raw_time = raw_time_and_comment.strip().split(maxsplit=1)[0] if raw_time_and_comment.strip() else ""
         planned_seconds = cls._parse_planned_seconds(raw_time)
         if not clean_name or planned_seconds is None:
             return title, None, False

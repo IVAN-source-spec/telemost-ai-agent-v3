@@ -6,11 +6,12 @@ import time
 from pathlib import Path
  
 class AudioRecorder:
-    def __init__(self, sample_rate=44100, channels=2, chunk=1024, log_prefix="[AudioRecorder]"):
+    def __init__(self, sample_rate=44100, channels=2, chunk=1024, log_prefix="[AudioRecorder]", on_audio_chunk=None):
         self.sample_rate = sample_rate
         self.channels = channels
         self.chunk = chunk
         self.log_prefix = log_prefix
+        self.on_audio_chunk = on_audio_chunk
         self.format = pyaudio.paInt16
         self.audio = pyaudio.PyAudio()
         self.stream = None
@@ -83,6 +84,11 @@ class AudioRecorder:
             try:
                 data = self.stream.read(self.chunk, exception_on_overflow=False)
                 self.frames.append(data)
+                if self.on_audio_chunk is not None:
+                    try:
+                        self.on_audio_chunk(data)
+                    except Exception as callback_error:
+                        self._log(f"Audio chunk callback error: {callback_error}")
             except Exception as e:
                 self._log(f"Recording error: {e}")
                 break

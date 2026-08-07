@@ -3,6 +3,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 
 from dotenv import load_dotenv
 from core.storage.meeting_storage import get_meeting_storage
@@ -396,9 +397,14 @@ def _summary_path_for_audio(audio_path: Path) -> Path:
     return _meeting_dir_for_audio(audio_path) / "participants_all.json"
 
 
-def _participant_email_map(audio_path: Path) -> dict[str, str]:
+def _participants_summary_for_audio(audio_path: Path) -> dict:
     summary = _load_json_file(_summary_path_for_audio(audio_path))
-    if not isinstance(summary, dict):
+    return summary if isinstance(summary, dict) else {}
+
+
+def _participant_email_map(audio_path: Path) -> dict[str, str]:
+    summary = _participants_summary_for_audio(audio_path)
+    if not summary:
         return {}
 
     emails: dict[str, str] = {}
@@ -457,7 +463,32 @@ def _participant_names_for_audio(audio_path: Path) -> list[str]:
     return []
 
 
+def _expected_participants_for_audio(audio_path: Path) -> list[dict]:
+    summary = _participants_summary_for_audio(audio_path)
+    participants = []
+    seen = set()
+    for item in summary.get("expected_participants") or []:
+        if not isinstance(item, dict):
+            continue
+        clean_name = _clean_text(item.get("name"))
+        key = _name_key(clean_name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        participant = {"display_name": clean_name}
+        email = _clean_email(item.get("email"))
+        if email:
+            participant["email"] = email
+        participants.append(participant)
+    return participants
+
+
 def participants_for_audio(audio_path: Path) -> list[dict]:
+    if segment_type_for_audio(audio_path) == "public":
+        expected_participants = _expected_participants_for_audio(audio_path)
+        if expected_participants:
+            return expected_participants
+
     email_by_name = _participant_email_map(audio_path)
     participants = []
     seen = set()
@@ -479,25 +510,87 @@ def segment_type_for_audio(audio_path: Path) -> str:
     return "confidential" if _is_confidential_dir(audio_path.parent) else "public"
 
 
-def result_recipients_for_audio(audio_path: Path, participants: list[dict]) -> list[dict] | None:
-    if segment_type_for_audio(audio_path) != "confidential":
+def _recipient_from_name_email(name: object = None, email: object = None) -> dict | None:
+    clean_email = _clean_email(email)
+    if not clean_email:
         return None
+    recipient = {"email": clean_email}
+    display_name = _clean_text(name)
+    if display_name and display_name != clean_email:
+        recipient["display_name"] = display_name
+    return recipient
+
+
+def _parse_person_with_email(value: object) -> dict | None:
+    if isinstance(value, dict):
+        return _recipient_from_name_email(
+            value.get("display_name") or value.get("full_name") or value.get("name"),
+            value.get("email") or value.get("mail"),
+        )
+    text = _clean_text(value)
+    if not text:
+        return None
+    email = None
+    angle_match = re.search(r"<\s*([^<>\s@]+@[^<>\s@]+\.[^<>\s@]+)\s*>", text)
+    if angle_match:
+        email = angle_match.group(1)
+        text = _clean_text(text[:angle_match.start()] + " " + text[angle_match.end():])
+    else:
+        trailing_match = re.search(r"(?:\s+-\s+|\s+)([^\s<>@]+@[^\s<>@]+\.[^\s<>@]+)\s*$", text)
+        if trailing_match:
+            email = trailing_match.group(1)
+            text = _clean_text(text[:trailing_match.start()])
+    return _recipient_from_name_email(text, email)
+
+
+def _unique_recipients(items: list[dict | None]) -> list[dict]:
     recipients = []
     seen = set()
-    for participant in participants:
-        email = _clean_email(participant.get("email"))
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        email = _clean_email(item.get("email"))
         if not email or email in seen:
             continue
         seen.add(email)
         recipient = {"email": email}
-        display_name = _clean_text(participant.get("display_name"))
+        display_name = _clean_text(item.get("display_name"))
         if display_name:
             recipient["display_name"] = display_name
         recipients.append(recipient)
     return recipients
 
 
-def organizer_for_transcription() -> dict | None:
+def expected_result_recipients_for_audio(audio_path: Path) -> list[dict]:
+    summary = _participants_summary_for_audio(audio_path)
+    recipients = []
+    for item in summary.get("expected_participants") or []:
+        if not isinstance(item, dict):
+            continue
+        recipients.append(_recipient_from_name_email(item.get("name"), item.get("email")))
+    organizer = organizer_for_transcription(audio_path)
+    if organizer:
+        recipients.append(organizer)
+    return _unique_recipients(recipients)
+
+
+def result_recipients_for_audio(audio_path: Path, participants: list[dict]) -> list[dict] | None:
+    if segment_type_for_audio(audio_path) == "confidential":
+        return _unique_recipients([
+            _recipient_from_name_email(participant.get("display_name"), participant.get("email"))
+            for participant in participants
+        ])
+    recipients = expected_result_recipients_for_audio(audio_path)
+    return recipients or None
+
+
+def organizer_for_transcription(audio_path: Path | None = None) -> dict | None:
+    if audio_path is not None:
+        meeting_time = _load_json_file(_meeting_dir_for_audio(audio_path) / "meeting_time.json")
+        if isinstance(meeting_time, dict):
+            organizer = _parse_person_with_email(meeting_time.get("organizer"))
+            if organizer:
+                return organizer
     email = _clean_email(
         os.getenv("REMOTE_TRANSCRIPTION_ORGANIZER_EMAIL")
         or os.getenv("TRANSCRIPTION_ORGANIZER_EMAIL")
@@ -510,10 +603,7 @@ def organizer_for_transcription() -> dict | None:
         or os.getenv("TRANSCRIPTION_ORGANIZER_NAME")
         or os.getenv("TELEMOST_ORGANIZER_NAME")
     )
-    organizer = {"email": email}
-    if name:
-        organizer["display_name"] = name
-    return organizer
+    return _recipient_from_name_email(name, email)
 
 
 def transcription_title_for_audio(audio_path: Path) -> str:
@@ -540,7 +630,6 @@ async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: st
     write_status(status_file, data)
 
     print(f"[TranscriptionMonitor] Submitting transcription via {backend}: {audio_path}")
-    print(f"[TranscriptionMonitor] Target speakers: {target_speakers}")
     try:
         if backend == "remote":
             from core.transcription.remote_adapter import build_remote_transcription_adapter_from_env
@@ -548,13 +637,17 @@ async def submit_transcription(meeting_dir: Path, status_data: dict, api_key: st
             adapter = build_remote_transcription_adapter_from_env()
             remote_participants = participants_for_audio(audio_path)
             remote_segment_type = segment_type_for_audio(audio_path)
+            if remote_segment_type == "public" and remote_participants:
+                target_speakers = max(1, len(remote_participants))
             remote_result_recipients = result_recipients_for_audio(audio_path, remote_participants)
-            remote_organizer = organizer_for_transcription()
+            remote_organizer = organizer_for_transcription(audio_path)
+            data["target_speakers"] = target_speakers
             data["remote_participants"] = remote_participants
             data["remote_segment_type"] = remote_segment_type
             data["remote_result_recipients"] = remote_result_recipients
             data["remote_organizer"] = remote_organizer
             write_status(status_file, data)
+            print(f"[TranscriptionMonitor] Target speakers: {target_speakers}")
 
             payload = await asyncio.to_thread(
                 adapter.submit_job,

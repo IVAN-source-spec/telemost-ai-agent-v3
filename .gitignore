@@ -17,8 +17,6 @@ recordings/
  
 # Конфигурации с секретами
 .env
-auth_state.json
-auth_state.artifact.json
  
 # Файлы IDE
 .vscode/
@@ -50,3 +48,40 @@ yandex_disk_upload_errors*.jsonl
 *.bak-*
 *.patch
 *.before-*
+
+# Local environment variants
+.env.*
+!.env.example
+
+# Test/cache/runtime artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.cache/
+tmp/
+temp/
+*.tmp
+
+# Playwright / browser diagnostics
+playwright-report/
+test-results/
+chat_commands_probe_*.png
+chat_commands_probe_*.html
+chat_commands_probe_*.json
+*.png
+*.jpg
+*.jpeg
+
+# Voice command debug/runtime
+voice_commands_debug*.jsonl
+voice_commands_debug*.json
+voice_debug/
+voice-command-debug/
+
+# Runtime service files
+node_dashboard.log
+uvicorn*.log
+nohup.out
+yandex_disk_upload_errors_bot_*.jsonl

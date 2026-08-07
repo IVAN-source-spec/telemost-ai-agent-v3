@@ -17,6 +17,7 @@ services:
       TELEMOST_BOT_POOL_SIZE: "1"
       BOT_NODE_ID: telemost-vm-3-bot-1
       BOT_NODE_NAME: "Третья VM Bot 1"
+      VOICE_COMMANDS_SERVICE_URL: ws://host.docker.internal:8020/ws/audio
     command:
       - sh
       - -lc
@@ -37,6 +38,8 @@ services:
       - ./yandex_disk_upload_errors_bot_1.jsonl:/app/yandex_disk_upload_errors.jsonl
       - /run/user/1002/pulse/native:/run/user/1002/pulse/native
       - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     shm_size: "2gb"
 
   telemost-bot-2:
@@ -57,6 +60,7 @@ services:
       TELEMOST_BOT_POOL_SIZE: "1"
       BOT_NODE_ID: telemost-vm-3-bot-2
       BOT_NODE_NAME: "Третья VM Bot 2"
+      VOICE_COMMANDS_SERVICE_URL: ws://host.docker.internal:8020/ws/audio
     command:
       - sh
       - -lc
@@ -77,6 +81,8 @@ services:
       - ./yandex_disk_upload_errors_bot_2.jsonl:/app/yandex_disk_upload_errors.jsonl
       - /run/user/1002/pulse/native:/run/user/1002/pulse/native
       - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     shm_size: "2gb"
 
   telemost-bot-3:
@@ -97,6 +103,7 @@ services:
       TELEMOST_BOT_POOL_SIZE: "1"
       BOT_NODE_ID: telemost-vm-3-bot-3
       BOT_NODE_NAME: "Третья VM Bot 3"
+      VOICE_COMMANDS_SERVICE_URL: ws://host.docker.internal:8020/ws/audio
     command:
       - sh
       - -lc
@@ -117,6 +124,8 @@ services:
       - ./yandex_disk_upload_errors_bot_3.jsonl:/app/yandex_disk_upload_errors.jsonl
       - /run/user/1002/pulse/native:/run/user/1002/pulse/native
       - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     shm_size: "2gb"
 
   telemost-node-dashboard:

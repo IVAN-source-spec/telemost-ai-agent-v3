@@ -68,6 +68,29 @@ class ChatCommandsModule:
         return self._messages_path()
 
 
+    async def handle_command_text(
+        self,
+        text: str,
+        *,
+        source: str = "external",
+        command_id: str | None = None,
+    ) -> bool:
+        normalized_text = self._normalize_message_text(str(text or ""))
+        if not normalized_text:
+            return False
+        key_value = command_id or normalized_text
+        command_key = f"{source}:{key_value}"
+        before_count = len(self._handled_command_keys)
+        await self._handle_new_messages([
+            {
+                "text": normalized_text,
+                "_message_key": command_key,
+                "author": source,
+                "time": "",
+            }
+        ])
+        return command_key in self._handled_command_keys or len(self._handled_command_keys) > before_count
+
     async def _capture_existing_messages_baseline(self) -> None:
         try:
             await self.page.wait_for_timeout(800)
@@ -140,18 +163,63 @@ class ChatCommandsModule:
             return
 
         try:
-            send_result = await self._send_service_message(message)
-            self._startup_anchor_sent = send_result.startswith("sent")
-            self.logger(f"[Bot] Chat startup message result: {send_result}")
-            if not self._startup_anchor_sent:
-                await self._capture_existing_messages_baseline()
-                self._startup_anchor_seen = False
-                self.logger("[Bot] Chat command session anchor is waiting because startup message was not confirmed")
+            before_count = await self._message_text_occurrence_count(message)
+            last_result = "not attempted"
+            for attempt in range(1, 4):
+                send_result = await self._send_service_message(message)
+                last_result = send_result
+                await self.page.wait_for_timeout(1200)
+                after_count = await self._message_text_occurrence_count(message)
+                self.logger(
+                    f"[Bot] Chat startup message result: {send_result}; "
+                    f"visible matches {before_count}->{after_count}; attempt {attempt}/3"
+                )
+                if after_count > before_count or await self._latest_visible_message_matches(message):
+                    self._startup_anchor_sent = True
+                    return
+                await self.page.wait_for_timeout(1500)
+            self._startup_anchor_sent = False
+            await self._capture_existing_messages_baseline()
+            self._startup_anchor_seen = False
+            self.logger(
+                f"[Bot] Chat command session anchor is waiting because startup message was not visible; "
+                f"last result: {last_result}"
+            )
         except Exception as error:
             self.logger(f"[Bot] Chat startup message failed: {error}")
             await self._capture_existing_messages_baseline()
             self._startup_anchor_seen = False
             self.logger("[Bot] Chat command session anchor is waiting after startup message failure")
+
+    async def _message_text_occurrence_count(self, message: str) -> int:
+        expected = self._normalize_message_text(message)
+        try:
+            messages = await self._read_visible_chat_messages()
+        except Exception:
+            return 0
+        count = 0
+        for item in messages:
+            text = self._normalize_message_text(str(item.get("text") or ""))
+            if text == expected:
+                count += 1
+        return count
+
+    async def _latest_visible_message_matches(self, message: str) -> bool:
+        expected = self._normalize_message_text(message)
+        if not expected:
+            return False
+        try:
+            messages = await self._read_visible_chat_messages()
+        except Exception:
+            return False
+        for item in reversed(messages):
+            text = self._normalize_message_text(str(item.get("text") or ""))
+            if text:
+                return text == expected
+        return False
+
+    async def _visible_message_match_count(self, message: str) -> int:
+        return await self._message_text_occurrence_count(message)
 
     def _startup_message_text(self) -> str:
         command_lines = [
@@ -246,11 +314,11 @@ class ChatCommandsModule:
                 "#все вопросы",
                 "Показывает всю повестку со статусами, плановым и фактическим временем.",
                 "",
-                "#назначить время №3 10:30",
-                "Назначает или переназначает плановое время для незавершенного вопроса. Форматы: 79, 1:20, 1:04:23.",
+                "#назначить время №3 20",
+                "Назначает или переназначает плановое время для незавершенного вопроса. Форматы: 20 минут, 1:20 - 1 час 20 минут, 1:20:30 - 1 час 20 минут 30 секунд.",
                 "",
-                "#добавить вопрос Название вопроса - 10:30",
-                "Добавляет новый вопрос в конец повестки. Время указывать необязательно.",
+                "#добавить вопрос Название вопроса - 20",
+                "Добавляет новый вопрос в конец повестки. Время указывать необязательно, формат такой же: минуты, часы:минуты или часы:минуты:секунды.",
                 "",
                 "#пропустить текущий вопрос",
                 "Помечает текущий вопрос как пропущенный участником и переводит повестку на следующий незавершенный вопрос.",
@@ -261,9 +329,23 @@ class ChatCommandsModule:
         return "\n".join(lines)
 
     async def _send_service_message(self, message: str) -> str:
-        result = await self._send_message_to_chat(message)
-        self._bot_sent_texts.add(self._normalize_message_text(message))
-        return result
+        normalized = self._normalize_message_text(message)
+        before_count = await self._message_text_occurrence_count(message)
+        last_result = "not attempted"
+        for attempt in range(1, 4):
+            result = await self._send_message_to_chat(message)
+            last_result = result
+            self._bot_sent_texts.add(normalized)
+            await self.page.wait_for_timeout(1200)
+            after_count = await self._message_text_occurrence_count(message)
+            if after_count > before_count or await self._latest_visible_message_matches(message):
+                return result if attempt == 1 else f"{result}; verified on attempt {attempt}"
+            self.logger(
+                f"[Bot] Service message was not visible after attempt {attempt}/3: "
+                f"{result}; matches {before_count}->{after_count}"
+            )
+            await self.page.wait_for_timeout(1200)
+        return f"{last_result}; message was not visible after retries"
 
     async def _send_message_to_chat(self, message: str) -> str:
         chat_frame = await self._wait_for_chat_frame(timeout_ms=10000)
@@ -692,6 +774,12 @@ class ChatCommandsModule:
                 self.logger(f"[Bot] Delete participants final response result: {result}")
                 continue
 
+            if not self.agenda_enabled and self._is_any_agenda_command(text):
+                self._handled_command_keys.add(key)
+                result = await self._send_service_message(self._agenda_not_available_response())
+                self.logger(f"[Bot] Agenda command rejected without agenda: {result}")
+                continue
+
             if self.agenda_enabled:
                 add_question_text = self._parse_add_agenda_question_command(text)
                 if add_question_text is not None:
@@ -1039,6 +1127,23 @@ class ChatCommandsModule:
     def _is_next_agenda_command(self, text: str) -> bool:
         normalized = self._normalize_message_text(text).lower()
         return normalized in self.NEXT_AGENDA_COMMANDS
+
+    def _is_any_agenda_command(self, text: str) -> bool:
+        return (
+            self._parse_add_agenda_question_command(text) is not None
+            or self._parse_skip_agenda_question_command(text) is not None
+            or self._is_skip_current_agenda_command(text)
+            or self._parse_assign_agenda_time_command(text) is not None
+            or self._is_agenda_without_time_command(text)
+            or self._is_unfinished_agenda_command(text)
+            or self._is_all_agenda_command(text)
+            or self._parse_switch_agenda_question_command(text) is not None
+            or self._is_end_agenda_question_command(text)
+            or self._is_next_agenda_command(text)
+        )
+
+    def _agenda_not_available_response(self) -> str:
+        return "\u041f\u043e\u0432\u0435\u0441\u0442\u043a\u0430 \u043d\u0435 \u043f\u0435\u0440\u0435\u0434\u0430\u043d\u0430 \u0434\u043b\u044f \u044d\u0442\u043e\u0439 \u0432\u0441\u0442\u0440\u0435\u0447\u0438, \u043a\u043e\u043c\u0430\u043d\u0434\u044b \u043f\u043e\u0432\u0435\u0441\u0442\u043a\u0438 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u044b."
 
     def _is_end_agenda_question_command(self, text: str) -> bool:
         normalized = self._normalize_message_text(text).lower()

@@ -144,14 +144,12 @@ class YandexDiskClient:
         )
 
     def move_resource(self, source_path: str, target_path: str, overwrite: bool = True) -> None:
-        url = (
-            f"{API_BASE}/move?"
-            f"{urllib.parse.urlencode({
-                'from': self._api_path(source_path),
-                'path': self._api_path(target_path),
-                'overwrite': str(overwrite).lower(),
-            })}"
-        )
+        params = {
+            "from": self._api_path(source_path),
+            "path": self._api_path(target_path),
+            "overwrite": str(overwrite).lower(),
+        }
+        url = f"{API_BASE}/move?{urllib.parse.urlencode(params)}"
         result = self._request("POST", url)
         self._wait_operation(result)
 

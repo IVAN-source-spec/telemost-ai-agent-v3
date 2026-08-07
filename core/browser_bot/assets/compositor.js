@@ -7,10 +7,13 @@
         return;
     }
 
-    window.__COMPOSITOR_VERSION__ = 1;
+    window.__COMPOSITOR_VERSION__ = 3;
 
-    const CANVAS_WIDTH = 640;
-    const CANVAS_HEIGHT = 480;
+    const CANVAS_WIDTH = 1280;
+    const CANVAS_HEIGHT = 720;
+    const FOOTER_HEIGHT = 50;
+    const CONTENT_HEIGHT = CANVAS_HEIGHT - FOOTER_HEIGHT;
+    const HOUR_SECONDS = 3600;
     const canvas = document.createElement("canvas");
     canvas.width = CANVAS_WIDTH;
     canvas.height = CANVAS_HEIGHT;
@@ -32,98 +35,263 @@
         const hours = Math.floor(safeSeconds / 3600);
         const minutes = Math.floor((safeSeconds % 3600) / 60);
         const seconds = safeSeconds % 60;
-        return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+        return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
     }
 
-    function truncateText(text, maxWidth, font) {
+    function wrapText(text, maxWidth, font, maxLines) {
         ctx.font = font;
-        if (ctx.measureText(text).width <= maxWidth) {
-            return text;
+        const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+        const lines = [];
+        let current = "";
+        for (const word of words) {
+            const candidate = current ? `${current} ${word}` : word;
+            if (ctx.measureText(candidate).width <= maxWidth || !current) {
+                current = candidate;
+            } else {
+                lines.push(current);
+                current = word;
+                if (lines.length >= maxLines - 1) {
+                    break;
+                }
+            }
         }
-        let truncated = text;
-        while (truncated.length > 0 && ctx.measureText(`${truncated}...`).width > maxWidth) {
-            truncated = truncated.slice(0, -1);
+        if (current && lines.length < maxLines) {
+            lines.push(current);
         }
-        return `${truncated}...`;
+        if (words.length && lines.length === maxLines) {
+            let last = lines[lines.length - 1];
+            while (last.length > 0 && ctx.measureText(`${last}...`).width > maxWidth) {
+                last = last.slice(0, -1);
+            }
+            lines[lines.length - 1] = `${last}...`;
+        }
+        return lines;
+    }
+
+    function roundRect(x, y, w, h, r) {
+        const radius = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + radius, y);
+        ctx.arcTo(x + w, y, x + w, y + h, radius);
+        ctx.arcTo(x + w, y + h, x, y + h, radius);
+        ctx.arcTo(x, y + h, x, y, radius);
+        ctx.arcTo(x, y, x + w, y, radius);
+        ctx.closePath();
+    }
+
+    function fillRoundRect(x, y, w, h, r, fillStyle) {
+        ctx.fillStyle = fillStyle;
+        roundRect(x, y, w, h, r);
+        ctx.fill();
+    }
+
+    function strokeRoundRect(x, y, w, h, r, strokeStyle, lineWidth) {
+        ctx.strokeStyle = strokeStyle;
+        ctx.lineWidth = lineWidth;
+        roundRect(x, y, w, h, r);
+        ctx.stroke();
     }
 
     function drawBackground() {
         const gradient = ctx.createLinearGradient(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-        gradient.addColorStop(0, "#111827");
-        gradient.addColorStop(0.55, "#172033");
-        gradient.addColorStop(1, "#0f766e");
+        gradient.addColorStop(0, "#080d11");
+        gradient.addColorStop(0.52, "#0b1117");
+        gradient.addColorStop(1, "#101720");
         ctx.fillStyle = gradient;
         ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    }
 
-        ctx.fillStyle = "#1d4ed8";
-        ctx.fillRect(0, 0, CANVAS_WIDTH, 6);
+    function drawCard(x, y, w, h, radius = 18) {
+        const gradient = ctx.createLinearGradient(x, y, x + w, y + h);
+        gradient.addColorStop(0, "#18212a");
+        gradient.addColorStop(1, "#101923");
+        fillRoundRect(x, y, w, h, radius, gradient);
+        strokeRoundRect(x, y, w, h, radius, "rgba(255,255,255,0.045)", 1.5);
+    }
+
+    function fontThatFits(text, maxWidth, preferredPx, minPx, weight = "bold") {
+        let size = preferredPx;
+        while (size > minPx) {
+            ctx.font = `${weight} ${size}px Arial`;
+            if (ctx.measureText(text).width <= maxWidth) {
+                return ctx.font;
+            }
+            size -= 1;
+        }
+        ctx.font = `${weight} ${minPx}px Arial`;
+        return ctx.font;
+    }
+
+    function drawMeetingCircle(cx, cy, radius, elapsedSeconds, compact) {
+        const fraction = (Math.max(0, elapsedSeconds) % HOUR_SECONDS) / HOUR_SECONDS;
+        const startAngle = -Math.PI / 2;
+        const endAngle = startAngle + Math.max(0.012, fraction) * Math.PI * 2;
+
+        ctx.lineWidth = compact ? 16 : 24;
+        ctx.lineCap = "round";
+        ctx.strokeStyle = "#33404b";
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        ctx.stroke();
+
+        const arcGradient = ctx.createLinearGradient(cx - radius, cy - radius, cx + radius, cy + radius);
+        arcGradient.addColorStop(0, "#55e99a");
+        arcGradient.addColorStop(1, "#16a34a");
+        ctx.strokeStyle = arcGradient;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, startAngle, endAngle);
+        ctx.stroke();
+        ctx.lineCap = "butt";
+
+        const timeText = formatTime(elapsedSeconds);
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = fontThatFits(timeText, radius * 1.42, compact ? 45 : 70, compact ? 28 : 44);
+        ctx.fillText(timeText, cx, cy + (compact ? 12 : 18));
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = compact ? "bold 18px Arial" : "bold 26px Arial";
+        ctx.fillText("ПРОШЛО", cx, cy + (compact ? 44 : 62));
+    }
+
+    function meetingElapsedSeconds() {
+        const startTimeMs = sceneData.startTimeMs || Date.now();
+        return Math.floor((Date.now() - startTimeMs) / 1000);
+    }
+
+    function agendaQuestionElapsedSeconds() {
+        const segmentElapsed = Math.floor((Date.now() - (sceneData.agendaQuestionStartTimeMs || Date.now())) / 1000);
+        return Number(sceneData.agendaAccumulatedSeconds || 0) + segmentElapsed;
+    }
+
+    function drawPlainMeetingTimer(elapsed) {
+        drawCard(22, 22, CANVAS_WIDTH - 44, CONTENT_HEIGHT - 44, 18);
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#8c98a5";
+        ctx.font = "bold 29px Arial";
+        ctx.fillText("ВСТРЕЧА", CANVAS_WIDTH / 2, 86);
+
+        const title = (sceneData.meetingTitle || "Telemost Bot").toUpperCase();
+        const titleLines = wrapText(title, CANVAS_WIDTH - 180, "bold 44px Arial", 2);
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "bold 44px Arial";
+        titleLines.forEach((line, index) => ctx.fillText(line, CANVAS_WIDTH / 2, 136 + index * 52));
+
+        drawMeetingCircle(CANVAS_WIDTH / 2, 378, 150, elapsed, false);
+    }
+
+    function drawQuestionProgress(x, y, w, h, elapsed, plannedSeconds) {
+        const hasPlan = plannedSeconds > 0;
+        fillRoundRect(x, y, w, h, 14, "#34434f");
+
+        if (!hasPlan) {
+            const progressW = Math.max(20, Math.min(w, w * ((elapsed % HOUR_SECONDS) / HOUR_SECONDS)));
+            fillRoundRect(x, y, progressW, h, 14, "#16a34a");
+            ctx.fillStyle = "#f8fafc";
+            ctx.font = fontThatFits(`${formatTime(elapsed)} ПРОШЛО`, w - 40, 28, 20);
+            ctx.textAlign = "center";
+            ctx.fillText(`${formatTime(elapsed)} ПРОШЛО`, x + w / 2, y + h / 2 + 10);
+            return;
+        }
+
+        const overrun = Math.max(0, elapsed - plannedSeconds);
+        const within = Math.min(elapsed, plannedSeconds);
+        const greenW = overrun > 0 ? w : Math.max(0, Math.min(w, w * (within / plannedSeconds)));
+        if (greenW > 0) {
+            const greenGradient = ctx.createLinearGradient(x, y, x + greenW, y);
+            greenGradient.addColorStop(0, "#23c46a");
+            greenGradient.addColorStop(1, "#16a34a");
+            fillRoundRect(x, y, greenW, h, 14, greenGradient);
+        }
+
+        if (overrun > 0) {
+            const redW = Math.max(16, Math.min(w, w * (overrun / plannedSeconds)));
+            const redGradient = ctx.createLinearGradient(x + w - redW, y, x + w, y);
+            redGradient.addColorStop(0, "#fb923c");
+            redGradient.addColorStop(1, "#dc2626");
+            fillRoundRect(x + w - redW, y, redW, h, 14, redGradient);
+        }
+
+        ctx.fillStyle = "#f8fafc";
+        ctx.textAlign = "center";
+        const elapsedLabel = overrun > 0 ? `${formatTime(plannedSeconds)} ЛИМИТ` : `${formatTime(elapsed)} ПРОШЛО`;
+        const remainingLabel = overrun > 0 ? `+${formatTime(overrun)} ПЕРЕРАСХОД` : `${formatTime(plannedSeconds - elapsed)} ОСТАЛОСЬ`;
+        ctx.font = "bold 24px Arial";
+        const halfWidth = w * 0.44;
+        if (ctx.measureText(elapsedLabel).width > halfWidth || ctx.measureText(remainingLabel).width > halfWidth) {
+            ctx.font = "bold 21px Arial";
+        }
+        ctx.fillText(elapsedLabel, x + w * 0.26, y + h / 2 + 9);
+        ctx.fillText(remainingLabel, x + w * 0.74, y + h / 2 + 9);
+    }
+
+    function drawAgendaSplit(elapsed, questionElapsed, plannedSeconds) {
+        drawCard(22, 22, CANVAS_WIDTH - 44, CONTENT_HEIGHT - 44, 18);
+
+        const leftX = 54;
+        const topY = 54;
+        const leftW = 790;
+        const leftH = 540;
+        const rightX = 876;
+        const rightW = 350;
+        const rightH = 540;
+        drawCard(leftX, topY, leftW, leftH, 14);
+        drawCard(rightX, topY, rightW, rightH, 14);
+
+        ctx.textAlign = "left";
+        ctx.fillStyle = "#8c98a5";
+        ctx.font = "bold 25px Arial";
+        ctx.fillText(`ВОПРОС ${sceneData.agendaIndex || 1} / ${sceneData.agendaTotal || 1}`, leftX + 34, topY + 58);
+
+        const title = (sceneData.agendaTitle || "Текущий вопрос").toUpperCase();
+        const titleLines = wrapText(title, leftW - 68, "bold 43px Arial", 3);
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "bold 43px Arial";
+        titleLines.forEach((line, index) => ctx.fillText(line, leftX + 34, topY + 116 + index * 50));
+
+        ctx.fillStyle = "#8c98a5";
+        ctx.font = "bold 21px Arial";
+        const limitText = plannedSeconds > 0 ? `ВОПРОС · ЛИМИТ ${formatTime(plannedSeconds)}` : "ВОПРОС · БЕЗ ЛИМИТА";
+        ctx.fillText(limitText, leftX + 34, topY + 386);
+        drawQuestionProgress(leftX + 34, topY + 410, leftW - 68, 62, questionElapsed, plannedSeconds);
+
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#8c98a5";
+        ctx.font = "bold 25px Arial";
+        ctx.fillText("ВСТРЕЧА", rightX + rightW / 2, topY + 64);
+        drawMeetingCircle(rightX + rightW / 2, topY + 280, 110, elapsed, true);
     }
 
     function drawTimer() {
-        const startTimeMs = sceneData.startTimeMs || Date.now();
-        const elapsed = Math.floor((Date.now() - startTimeMs) / 1000);
-        const timeString = formatTime(elapsed);
-
-        ctx.textAlign = "center";
-
-        if (sceneData.agendaEnabled) {
-            const segmentElapsed = Math.floor((Date.now() - (sceneData.agendaQuestionStartTimeMs || Date.now())) / 1000);
-            const accumulatedSeconds = Number(sceneData.agendaAccumulatedSeconds || 0);
-            const questionElapsed = accumulatedSeconds + segmentElapsed;
-            const plannedSeconds = Number(sceneData.agendaPlannedSeconds || 0);
-            const hasCountdown = Boolean(sceneData.agendaCountdownEnabled && plannedSeconds > 0);
-            const remainingSeconds = plannedSeconds - questionElapsed;
-            const questionTime = hasCountdown
-                ? (remainingSeconds >= 0 ? formatTime(remainingSeconds) : `+${formatTime(Math.abs(remainingSeconds))}`)
-                : formatTime(questionElapsed);
-            const labelSuffix = hasCountdown ? "осталось" : "идет";
-            const label = `\u0432\u043e\u043f\u0440\u043e\u0441 ${sceneData.agendaIndex || 1}/${sceneData.agendaTotal || 1} · ${labelSuffix}`;
-            ctx.fillStyle = "#9ca3af";
-            ctx.font = "16px Arial";
-            ctx.fillText(label, CANVAS_WIDTH / 2, 72);
-            ctx.fillStyle = hasCountdown && remainingSeconds < 0 ? "#fb7185" : "#fbbf24";
-            ctx.font = "bold 38px monospace";
-            ctx.fillText(questionTime, CANVAS_WIDTH / 2, 110);
-            ctx.fillStyle = "#f9fafb";
-            ctx.font = "bold 21px Arial";
-            const agendaTitle = truncateText(sceneData.agendaTitle || "", CANVAS_WIDTH - 56, "bold 21px Arial");
-            ctx.fillText(agendaTitle, CANVAS_WIDTH / 2, 140);
-        } else {
-            ctx.fillStyle = "#f9fafb";
-            ctx.font = "bold 28px Arial";
-            const title = truncateText(sceneData.meetingTitle || "Telemost Bot", CANVAS_WIDTH - 48, "bold 28px Arial");
-            ctx.fillText(title, CANVAS_WIDTH / 2, 76);
+        const elapsed = meetingElapsedSeconds();
+        if (!sceneData.agendaEnabled) {
+            drawPlainMeetingTimer(elapsed);
+            return;
         }
-
-        ctx.fillStyle = "#9ca3af";
-        ctx.font = "18px Arial";
-        ctx.fillText("meeting time", CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 58);
-
-        ctx.fillStyle = "#34d399";
-        ctx.font = sceneData.agendaEnabled ? "bold 68px monospace" : "bold 86px monospace";
-        ctx.fillText(timeString, CANVAS_WIDTH / 2, sceneData.agendaEnabled ? CANVAS_HEIGHT / 2 + 34 : CANVAS_HEIGHT / 2 + 42);
+        const questionElapsed = agendaQuestionElapsedSeconds();
+        const plannedSeconds = Number(sceneData.agendaPlannedSeconds || 0);
+        drawAgendaSplit(elapsed, questionElapsed, plannedSeconds);
     }
 
     function drawFooter() {
         const blinkOn = Math.floor(Date.now() / 500) % 2 === 0;
-        ctx.fillStyle = "#1f2937";
-        ctx.fillRect(0, CANVAS_HEIGHT - 34, CANVAS_WIDTH, 34);
+        ctx.fillStyle = "#16202a";
+        ctx.fillRect(0, CANVAS_HEIGHT - FOOTER_HEIGHT, CANVAS_WIDTH, FOOTER_HEIGHT);
 
         if (blinkOn) {
             ctx.fillStyle = "#ef4444";
             ctx.beginPath();
-            ctx.arc(22, CANVAS_HEIGHT - 17, 7, 0, 2 * Math.PI);
+            ctx.arc(36, CANVAS_HEIGHT - 25, 9, 0, 2 * Math.PI);
             ctx.fill();
         }
 
         ctx.fillStyle = "#9ca3af";
-        ctx.font = "bold 13px Arial";
+        ctx.font = "bold 18px Arial";
         ctx.textAlign = "left";
-        ctx.fillText("REC", 38, CANVAS_HEIGHT - 11);
+        ctx.fillText("REC", 58, CANVAS_HEIGHT - 18);
 
         ctx.fillStyle = "#9ca3af";
         ctx.textAlign = "right";
-        ctx.fillText("Telemost Bot", CANVAS_WIDTH - 14, CANVAS_HEIGHT - 11);
+        ctx.fillText("Telemost Bot", CANVAS_WIDTH - 28, CANVAS_HEIGHT - 18);
     }
 
     function render() {
@@ -149,6 +317,8 @@
         getHealth() {
             return {
                 version: window.__COMPOSITOR_VERSION__,
+                canvasWidth: CANVAS_WIDTH,
+                canvasHeight: CANVAS_HEIGHT,
                 hasData: Object.keys(sceneData).length > 0,
                 startTimeMs: sceneData.startTimeMs,
                 renderLoopStarted,
