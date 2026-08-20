@@ -29,6 +29,14 @@ class BotMeetingRequest(BaseModel):
     organizer: Optional[str] = None
 
 
+class AgendaActivationRequest(BaseModel):
+    raw_agenda: str
+    source: Optional[str] = "calendar_monitor"
+    calendar_event_id: Optional[str] = None
+    meeting_url: Optional[str] = None
+    author: Optional[str] = None
+
+
 class TaskResponse(BaseModel):
     task_id: str
     status: str

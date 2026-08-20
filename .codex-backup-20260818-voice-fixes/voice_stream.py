@@ -80,15 +80,8 @@ class VoiceCommandsAudioClient:
         try:
             self._queue.put_nowait(None)
         except queue.Full:
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._queue.put_nowait(None)
-            except queue.Full:
-                pass
-        if self._thread and self._thread.is_alive() and self._thread is not threading.current_thread():
+            pass
+        if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
         self._write_debug({
             "event": "voice_stream_stopped",
@@ -137,7 +130,7 @@ class VoiceCommandsAudioClient:
                     while not self._stop_event.is_set():
                         item = await asyncio.to_thread(self._queue.get)
                         if item is None:
-                            break
+                            return
                         await websocket.send(item)
                         self._sent_chunks += 1
 
@@ -150,7 +143,6 @@ class VoiceCommandsAudioClient:
                             await receiver
                         except asyncio.CancelledError:
                             pass
-                    return
             except Exception as error:
                 if self._stop_event.is_set():
                     break
@@ -189,14 +181,6 @@ class VoiceCommandsAudioClient:
                     self.event_handler(payload)
                 except Exception as error:
                     self._write_debug({"event": "voice_service_event_handler_error", "error": str(error)})
-            if isinstance(payload, dict) and payload.get("type") in {
-                "voice_service_rejected",
-            }:
-                self._stop_event.set()
-                try:
-                    self._queue.put_nowait(None)
-                except queue.Full:
-                    pass
 
 
     def _delete_debug_file(self) -> None:

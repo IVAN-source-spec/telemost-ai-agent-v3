@@ -28,7 +28,6 @@ async def process_task(task_data):
 
     update_task_status(session_id, "running")
 
-    bot = None
     try:
         bot_headless = os.getenv("TELEMOST_BOT_HEADLESS", "false").lower() in (
             "1",
@@ -119,10 +118,8 @@ async def process_task(task_data):
         update_task_status(session_id, "failed", result={"error": str(e)})
         print(f"[Worker] Task {session_id} failed: {e}")
     finally:
-        if bot is not None:
-            bot.stop_voice_command_stream()
         try:
-            unregister_active_bot(bot_id, bot)
+            unregister_active_bot(bot_id, locals().get("bot"))
         finally:
             await bot_selector_instance.release_bot(bot_id)
         print(f"[Worker] Released bot: {bot_id}")

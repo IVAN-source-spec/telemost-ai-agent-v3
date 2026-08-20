@@ -783,34 +783,24 @@ class TelemostBot:
         self._print(f"[Bot] Audio recording started: {self.recording_audio_path}")
 
     def _stop_recording(self):
-        try:
-            if self.recorder is None:
-                return
-            self.recorder.stop()
-            if self.recording_audio_path is not None:
-                filename = self.recording_audio_path
-            elif self.session_id:
-                filename = self._meeting_artifacts().audio_path
-            else:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = Path(f"recording_{timestamp}.wav")
-            self.recorder.save(str(filename))
-            self.recorder.close()
-            self.recorder = None
-            self.recording_audio_path = None
-            self._print(f"[Bot] Audio recording saved to {filename}")
-        finally:
-            self.stop_voice_command_stream()
-
-    def stop_voice_command_stream(self) -> None:
-        client = self.voice_commands_client
-        self.voice_commands_client = None
-        if client is None:
+        if self.recorder is None:
             return
-        try:
-            client.stop()
-        except Exception as error:
-            self._print(f"[Bot] Voice command stream stop failed: {error}")
+        self.recorder.stop()
+        if self.recording_audio_path is not None:
+            filename = self.recording_audio_path
+        elif self.session_id:
+            filename = self._meeting_artifacts().audio_path
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = Path(f"recording_{timestamp}.wav")
+        self.recorder.save(str(filename))
+        self.recorder.close()
+        self.recorder = None
+        if self.voice_commands_client is not None:
+            self.voice_commands_client.stop()
+            self.voice_commands_client = None
+        self.recording_audio_path = None
+        self._print(f"[Bot] Audio recording saved to {filename}")
 
     def _handle_voice_service_payload_from_thread(self, payload: dict) -> None:
         loop = self._voice_status_loop
@@ -1352,7 +1342,6 @@ class TelemostBot:
 
     async def leave(self):
         """Закрывает браузер и завершает запись."""
-        self.stop_voice_command_stream()
         self._finish_meeting_timer()
         self._finish_confidential_recording_timer()
         self._stop_recording()
@@ -1400,6 +1389,7 @@ class TelemostBot:
         lost_checks = 0
         reconnect_enabled = config.get("reconnect_enabled", True)
         max_participants = 0  # начинаем с 0, так как бот считает других участников
+
         while True:
             if reconnect_enabled:
                 in_meeting = await self._is_in_meeting_room()

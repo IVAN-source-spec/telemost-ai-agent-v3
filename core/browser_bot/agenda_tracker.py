@@ -11,13 +11,20 @@ class AgendaTracker:
     )
     ITEM_MARKER_RE = re.compile(r"#\s*(?P<number>\d+)\s*\.")
     PLANNED_TIME_SEPARATOR = " - "
+    MATERIALS_SEPARATOR = "|"
+    MATERIALS_LABEL_RE = re.compile(
+        r"^(?:материалы?|ссылка на материалы?|ссылка)\s*:\s*",
+        re.IGNORECASE,
+    )
 
-    def __init__(self, raw_agenda: str, meeting_dir: str | Path, meeting_started_at: datetime, logger=print, bot_id: str = "unknown"):
+    def __init__(self, raw_agenda: str, meeting_dir: str | Path, meeting_started_at: datetime, logger=print, bot_id: str = "unknown", activation_source: str = "initial"):
         self.raw_agenda = raw_agenda or ""
         self.meeting_dir = Path(meeting_dir)
         self.meeting_started_at = meeting_started_at
         self.logger = logger
         self.bot_id = bot_id
+        self.activation_source = activation_source or "unknown"
+        self.activated_at = self._now().isoformat()
         self.items = self.parse_agenda(self.raw_agenda)
         self.current_index = 0 if self.items else None
         self.started = False
@@ -64,16 +71,46 @@ class AgendaTracker:
         return hours * 3600 + minutes * 60 + seconds
 
     @classmethod
-    def _split_title_and_planned_seconds(cls, title: str) -> tuple[str, int | None, bool]:
-        if cls.PLANNED_TIME_SEPARATOR not in title:
-            return title, None, False
-        name, raw_time_and_comment = title.rsplit(cls.PLANNED_TIME_SEPARATOR, 1)
+    def _normalize_materials(cls, value: str) -> str | None:
+        text = " ".join((value or "").strip().split())
+        if text.startswith("(") and text.endswith(")") and len(text) > 1:
+            text = text[1:-1].strip()
+        text = cls.MATERIALS_LABEL_RE.sub("", text, count=1).strip()
+        return text or None
+
+    @classmethod
+    def _split_title_time_and_materials(
+        cls,
+        title: str,
+    ) -> tuple[str, int | None, str | None, bool]:
+        normalized = " ".join((title or "").strip().split())
+        agenda_title = normalized
+        explicit_materials = None
+        if cls.MATERIALS_SEPARATOR in normalized:
+            agenda_title, raw_materials = normalized.split(cls.MATERIALS_SEPARATOR, 1)
+            agenda_title = agenda_title.strip()
+            explicit_materials = cls._normalize_materials(raw_materials)
+
+        if cls.PLANNED_TIME_SEPARATOR not in agenda_title:
+            return agenda_title, None, explicit_materials, False
+
+        name, raw_time_and_comment = agenda_title.rsplit(cls.PLANNED_TIME_SEPARATOR, 1)
         clean_name = " ".join(name.strip().split())
-        raw_time = raw_time_and_comment.strip().split(maxsplit=1)[0] if raw_time_and_comment.strip() else ""
+        time_and_comment = raw_time_and_comment.strip()
+        parts = time_and_comment.split(maxsplit=1) if time_and_comment else []
+        raw_time = parts[0] if parts else ""
         planned_seconds = cls._parse_planned_seconds(raw_time)
         if not clean_name or planned_seconds is None:
-            return title, None, False
-        return clean_name, planned_seconds, True
+            return agenda_title, None, explicit_materials, False
+
+        legacy_materials = cls._normalize_materials(parts[1]) if len(parts) > 1 else None
+        materials = explicit_materials if explicit_materials is not None else legacy_materials
+        return clean_name, planned_seconds, materials, True
+
+    @classmethod
+    def _split_title_and_planned_seconds(cls, title: str) -> tuple[str, int | None, bool]:
+        clean_title, planned_seconds, _materials, planned_ok = cls._split_title_time_and_materials(title)
+        return clean_title, planned_seconds, planned_ok
 
     @classmethod
     def parse_agenda(cls, raw_agenda: str) -> list[dict]:
@@ -98,12 +135,13 @@ class AgendaTracker:
                 number = int(marker.group("number"))
             except ValueError:
                 number = len(parsed_items) + 1
-            planned_title, planned_seconds, planned_ok = cls._split_title_and_planned_seconds(raw_title)
+            planned_title, planned_seconds, materials, planned_ok = cls._split_title_time_and_materials(raw_title)
             parsed_items.append({
                 "number": number,
                 "raw_title": raw_title,
                 "planned_title": planned_title,
                 "planned_seconds": planned_seconds,
+                "materials": materials,
                 "planned_ok": planned_ok,
             })
 
@@ -112,7 +150,7 @@ class AgendaTracker:
 
         items = []
         for parsed in parsed_items:
-            title = parsed["planned_title"] if parsed["planned_ok"] else parsed["raw_title"]
+            title = parsed["planned_title"]
             planned_seconds = parsed["planned_seconds"] if parsed["planned_ok"] else None
             items.append(cls._new_item(
                 index=len(items) + 1,
@@ -120,17 +158,52 @@ class AgendaTracker:
                 title=title,
                 raw_title=parsed["raw_title"],
                 planned_seconds=planned_seconds,
+                materials=parsed["materials"],
             ))
         return items
 
+    @classmethod
+    def validate_agenda(cls, raw_agenda: str) -> tuple[list[dict], str | None]:
+        raw = (raw_agenda or "").strip()
+        if not raw:
+            return [], "сообщение с повесткой пустое"
+
+        match = cls.AGENDA_BLOCK_RE.search(raw)
+        body = match.group("body") if match else raw
+        body = body.strip()
+        if body.lower().startswith("повестка:"):
+            body = body.split(":", 1)[1].strip()
+
+        markers = list(cls.ITEM_MARKER_RE.finditer(body))
+        if not markers:
+            return [], "не найдены пункты в формате #1. Название вопроса"
+
+        items = cls.parse_agenda(raw)
+        if len(items) != len(markers):
+            return [], "у одного или нескольких пунктов отсутствует название"
+
+        numbers = [int(item.get("number") or 0) for item in items]
+        if len(numbers) != len(set(numbers)):
+            return [], "номера пунктов повестки не должны повторяться"
+
+        return items, None
+
     @staticmethod
-    def _new_item(index: int, number: int, title: str, raw_title: str, planned_seconds: int | None) -> dict:
+    def _new_item(
+        index: int,
+        number: int,
+        title: str,
+        raw_title: str,
+        planned_seconds: int | None,
+        materials: str | None = None,
+    ) -> dict:
         return {
             "index": index,
             "number": number,
             "title": title,
             "raw_title": raw_title,
             "planned_seconds": planned_seconds,
+            "materials": materials,
             "started_at": None,
             "ended_at": None,
             "duration_seconds": None,
@@ -204,7 +277,13 @@ class AgendaTracker:
         if target.get("locked"):
             return {"status": "locked", "number": number, "title": target["title"], "message": f"Agenda item #{number} is already closed"}
         if self.current_index == target_index:
-            return {"status": "already_active", "index": target["index"], "total": len(self.items), "title": target["title"]}
+            return {
+                "status": "already_active",
+                "index": target["index"],
+                "total": len(self.items),
+                "title": target["title"],
+                "materials": target.get("materials"),
+            }
 
         if self.current_index is not None:
             self._close_current_segment(lock=False)
@@ -302,14 +381,15 @@ class AgendaTracker:
         raw_title = " ".join((raw_question or "").strip().split())
         if not raw_title:
             return {"status": "invalid_question", "message": "Question text is empty"}
-        title, planned_seconds, planned_ok = self._split_title_and_planned_seconds(raw_title)
+        title, planned_seconds, materials, planned_ok = self._split_title_time_and_materials(raw_title)
         next_number = max((int(item.get("number") or item.get("index") or 0) for item in self.items), default=0) + 1
         item = self._new_item(
             index=len(self.items) + 1,
             number=next_number,
-            title=title if planned_ok else raw_title,
+            title=title,
             raw_title=raw_title,
             planned_seconds=planned_seconds if planned_ok else None,
+            materials=materials,
         )
         item["added_at"] = self._now().isoformat()
         item["added_by"] = "chat_command"
@@ -325,6 +405,7 @@ class AgendaTracker:
             "title": item["title"],
             "planned_seconds": item.get("planned_seconds"),
             "planned_time": self._format_duration(item.get("planned_seconds")),
+            "materials": item.get("materials"),
         }
 
     def skip_current_question(self) -> dict:
@@ -412,6 +493,7 @@ class AgendaTracker:
             "index": item.get("index"),
             "number": item.get("number"),
             "title": item.get("title"),
+            "materials": item.get("materials"),
             "status": item.get("status"),
             "locked": bool(item.get("locked")),
             "skipped": bool(item.get("skipped")),
@@ -446,6 +528,7 @@ class AgendaTracker:
             "number": current["number"],
             "total": len(self.items),
             "title": current["title"],
+            "materials": current.get("materials"),
             "message": f"Agenda item {current['index']}/{len(self.items)}: {current['title']}",
         }
 
@@ -555,6 +638,8 @@ class AgendaTracker:
         self.meeting_dir.mkdir(parents=True, exist_ok=True)
         payload = {
             "source": self.raw_agenda,
+            "activation_source": self.activation_source,
+            "activated_at": self.activated_at,
             "planned_time_mode": self.planned_time_mode,
             "completed": self.completed,
             "current_index": None if self.current_index is None else self.current_index + 1,

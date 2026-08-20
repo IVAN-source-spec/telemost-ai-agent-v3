@@ -187,6 +187,39 @@ async def start_any_bot(req: MeetingRequest) -> JSONResponse:
     raise HTTPException(status_code=409, detail="No idle bot available on this VM")
 
 
+@app.get("/api/v1/bots/{global_bot_id}/agenda/status")
+async def get_specific_bot_agenda_status(global_bot_id: str) -> JSONResponse:
+    nodes = await collect_nodes()
+    endpoint = endpoint_for_bot(nodes, urllib.parse.unquote(global_bot_id))
+    if endpoint is None:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    data = await asyncio.to_thread(
+        request_json,
+        endpoint,
+        f"/api/v1/bots/{urllib.parse.quote(urllib.parse.unquote(global_bot_id).split(':')[-1])}/agenda/status",
+        "GET",
+        None,
+    )
+    return JSONResponse(data)
+
+
+@app.post("/api/v1/bots/{global_bot_id}/agenda/activate")
+async def activate_specific_bot_agenda(global_bot_id: str, payload: dict[str, Any]) -> JSONResponse:
+    nodes = await collect_nodes()
+    decoded_bot_id = urllib.parse.unquote(global_bot_id)
+    endpoint = endpoint_for_bot(nodes, decoded_bot_id)
+    if endpoint is None:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    data = await asyncio.to_thread(
+        request_json,
+        endpoint,
+        f"/api/v1/bots/{urllib.parse.quote(decoded_bot_id.split(':')[-1])}/agenda/activate",
+        "POST",
+        payload,
+    )
+    return JSONResponse(data)
+
+
 @app.post("/api/v1/bots/{global_bot_id}/meetings")
 async def start_specific_bot(global_bot_id: str, req: MeetingRequest) -> JSONResponse:
     nodes = await collect_nodes()
@@ -236,6 +269,10 @@ HTML = r'''<!doctype html>
     .bot h3 { margin:0 0 8px; font-size:18px; }
     .row { display:flex; justify-content:space-between; gap:10px; margin:5px 0; }
     .actions { display:flex; gap:8px; margin-top:12px; }
+    .agenda-box { margin-top:12px; padding:10px; border:1px solid #d8e0ea; border-radius:8px; background:#f8fafc; }
+    .agenda-form { display:grid; gap:8px; margin-top:10px; }
+    .ok { color:#15803d; font-weight:700; }
+    .warn { color:#b45309; font-weight:700; }
     .field-full { grid-column: 1 / -1; }
     code { font-size:12px; background:#eef2f7; padding:2px 4px; border-radius:4px; }
     .error { color:#b91c1c; white-space:pre-wrap; }
@@ -278,6 +315,56 @@ HTML = r'''<!doctype html>
       try { data = text ? JSON.parse(text) : {}; } catch { data = {detail:text}; }
       if (!res.ok) throw new Error(data.detail || text || res.statusText);
       return data;
+    }
+    function agendaInfo(bot) {
+      const agenda = bot.agenda_status || {};
+      const active = Boolean(agenda.agenda_active || agenda.enabled && agenda.status === 'active');
+      if (bot.status === 'idle') {
+        return {active:false, text:'Повестка не требуется', css:'muted'};
+      }
+      if (active) {
+        const source = agenda.source ? `, источник: ${agenda.source}` : '';
+        const count = agenda.items_count || agenda.total || 0;
+        return {active:true, text:`Повестка активна: ${count} пункт(ов)${source}`, css:'ok'};
+      }
+      return {active:false, text:'Повестка отсутствует', css:'warn'};
+    }
+    function agendaEditingActive() {
+      return document.activeElement?.closest?.('.agenda-form');
+    }
+    async function submitAgendaFromForm(ev, globalId) {
+      ev.preventDefault();
+      const form = ev.currentTarget;
+      const button = form.querySelector('button[type="submit"]');
+      const message = form.querySelector('.agenda-message');
+      const rawAgenda = form.querySelector('[name="raw_agenda"]').value.trim();
+      if (!rawAgenda) { message.className = 'agenda-message error'; message.textContent = '??????? ????????.'; return; }
+      button.disabled = true;
+      message.className = 'agenda-message muted';
+      message.textContent = 'Передаю повестку...';
+      try {
+        const data = await postJson('/api/v1/bots/' + encodeURIComponent(globalId) + '/agenda/activate', {
+          raw_agenda: rawAgenda,
+          source: 'dashboard'
+        });
+        if (data.status === 'already_active') {
+          message.className = 'agenda-message warn';
+          message.textContent = `Повестка уже принята, источник: ${data.source || 'unknown'}.`;
+        } else if (data.status === 'agenda_activated') {
+          message.className = 'agenda-message ok';
+          message.textContent = `Повестка принята: ${data.items_count || 0} пункт(ов).`;
+          form.reset();
+        } else {
+          message.className = 'agenda-message error';
+          message.textContent = data.error || data.status || '?? ??????? ???????? ????????.';
+        }
+        await load(true);
+      } catch (e) {
+        message.className = 'agenda-message error';
+        message.textContent = e.message;
+      } finally {
+        button.disabled = false;
+      }
     }
     function payloadFromForm(form) {
       return {
@@ -330,11 +417,24 @@ HTML = r'''<!doctype html>
         for (const bot of node.bots || []) {
           const status = bot.status || 'unknown';
           const gid = bot.global_bot_id || `${node.node_id}:${bot.bot_id}`;
+          const agenda = agendaInfo(bot);
+          const agendaBlock = status === 'idle' ? '' : `
+            <div class="agenda-box">
+              <div class="row"><span>Повестка</span><span class="${agenda.css}">${esc(agenda.text)}</span></div>
+              ${agenda.active ? `<div class="muted">Новая повестка через дашборд не принимается: первая корректная повестка уже зафиксирована.</div>` : `
+                <form class="agenda-form" onsubmit="submitAgendaFromForm(event, '${esc(gid)}')">
+                  <textarea name="raw_agenda" placeholder="Добавить повестку: ###Повестка: #1. Вопрос - 10:00 #2. Следующий вопрос###"></textarea>
+                  <button type="submit">Добавить повестку</button>
+                  <div class="agenda-message muted"></div>
+                </form>
+              `}
+            </div>`;
           cards.push(`<article class="bot ${esc(status)}"><h3>${esc(node.node_name)}</h3>
             <div class="row"><span>Статус</span><b>${esc(status)}</b></div>
             <div class="row"><span>Бот</span><code>${esc(bot.bot_id)}</code></div>
             <div class="row"><span>Встреча</span><span>${esc(fmt(bot.title || bot.session_id))}</span></div>
             <div class="row"><span>Ссылка</span><span>${bot.meeting_url ? `<a href="${esc(bot.meeting_url)}" target="_blank">открыть</a>` : '—'}</span></div>
+            ${agendaBlock}
             <form class="bot-form" onsubmit="startSpecificFromForm(event, '${esc(gid)}')">
               <input name="meeting_url" placeholder="Ссылка на встречу" required ${status === 'idle' ? '' : 'disabled'}>
               <input name="title" placeholder="Название, необязательно" ${status === 'idle' ? '' : 'disabled'}>
@@ -347,7 +447,8 @@ HTML = r'''<!doctype html>
       }
       bots.innerHTML = cards.join('') || '<p class="muted">Боты не найдены</p>';
     }
-    async function load() {
+    async function load(force = false) {
+      if (!force && agendaEditingActive()) return;
       try {
         const res = await fetch('/api/v1/node/status');
         render(await res.json());

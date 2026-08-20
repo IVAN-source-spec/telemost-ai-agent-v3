@@ -17,7 +17,7 @@ services:
       TELEMOST_BOT_POOL_SIZE: "1"
       BOT_NODE_ID: telemost-vm-3-bot-1
       BOT_NODE_NAME: "Третья VM Bot 1"
-      VOICE_COMMANDS_SERVICE_URL: ws://host.docker.internal:8020/ws/audio
+      VOICE_COMMANDS_SERVICE_URL: ws://192.168.101.68:8020/ws/audio
     command:
       - sh
       - -lc
@@ -60,7 +60,7 @@ services:
       TELEMOST_BOT_POOL_SIZE: "1"
       BOT_NODE_ID: telemost-vm-3-bot-2
       BOT_NODE_NAME: "Третья VM Bot 2"
-      VOICE_COMMANDS_SERVICE_URL: ws://host.docker.internal:8020/ws/audio
+      VOICE_COMMANDS_SERVICE_URL: ws://192.168.101.68:8020/ws/audio
     command:
       - sh
       - -lc
@@ -103,7 +103,7 @@ services:
       TELEMOST_BOT_POOL_SIZE: "1"
       BOT_NODE_ID: telemost-vm-3-bot-3
       BOT_NODE_NAME: "Третья VM Bot 3"
-      VOICE_COMMANDS_SERVICE_URL: ws://host.docker.internal:8020/ws/audio
+      VOICE_COMMANDS_SERVICE_URL: ws://192.168.101.68:8020/ws/audio
     command:
       - sh
       - -lc

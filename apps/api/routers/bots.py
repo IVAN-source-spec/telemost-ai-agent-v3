@@ -11,10 +11,11 @@ from core.orchestrator.contracts import (
 from ..dependencies import get_bot_selector, get_metadata_store, get_queue_publisher
 from ..node_config import get_global_bot_id, get_node_id, get_node_name
 from ..security import require_node_api_token
-from ..schemas import BotMeetingRequest, TaskResponse
+from ..schemas import AgendaActivationRequest, BotMeetingRequest, TaskResponse
 from ..session_utils import generate_session_id
 from ..task_store import create_task, get_task_by_external_event_id
 from core.storage.meeting_storage import get_meeting_storage
+from apps.worker.runtime_registry import get_active_bot
 
 bots_router = APIRouter(prefix="/api/v1/bots", tags=["bots"])
 
@@ -30,9 +31,25 @@ def _find_meeting_dir(session_id: str | None) -> Path | None:
     return sorted(candidates)[-1] if candidates else None
 
 
-def _load_agenda_status(bot: dict) -> dict | None:
-    if not bot.get("agenda_present"):
+def _live_agenda_status(bot_id: str | None) -> dict | None:
+    if not bot_id:
         return None
+    record = get_active_bot(bot_id)
+    if record is None:
+        return None
+    return record.bot.agenda_control_status()
+
+
+def _load_agenda_status(bot: dict) -> dict | None:
+    live_status = _live_agenda_status(bot.get("bot_id"))
+    if live_status is not None:
+        return live_status
+    if not bot.get("agenda_present"):
+        return {
+            "agenda_active": False,
+            "status": "idle" if bot.get("status") == "idle" else "missing",
+            "items_count": 0,
+        }
     meeting_dir = _find_meeting_dir(bot.get("session_id"))
     if meeting_dir is None:
         return {
@@ -105,6 +122,43 @@ async def list_bots(_auth=Depends(require_node_api_token), bot_selector=Depends(
         },
         "bots": bots,
     }
+
+
+def _active_bot_or_404(bot_id: str):
+    record = get_active_bot(bot_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Active bot not found: {bot_id}")
+    return record.bot
+
+
+@bots_router.get("/{bot_id}/agenda/status")
+async def get_bot_agenda_status(
+    bot_id: str,
+    _auth=Depends(require_node_api_token),
+):
+    bot = _active_bot_or_404(bot_id)
+    return bot.agenda_control_status()
+
+
+@bots_router.post("/{bot_id}/agenda/activate")
+async def activate_bot_agenda(
+    bot_id: str,
+    req: AgendaActivationRequest,
+    _auth=Depends(require_node_api_token),
+):
+    if not req.raw_agenda.strip():
+        raise HTTPException(status_code=400, detail="raw_agenda is required")
+    bot = _active_bot_or_404(bot_id)
+    result = await bot.activate_agenda_from_external(
+        req.raw_agenda,
+        source=req.source or "calendar_monitor",
+        metadata={
+            "calendar_event_id": req.calendar_event_id,
+            "meeting_url": req.meeting_url,
+            "author": req.author,
+        },
+    )
+    return result
 
 
 async def _enqueue_bot_meeting(
