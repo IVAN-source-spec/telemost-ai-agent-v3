@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from apps.api.routers.auth import auth_router
@@ -7,6 +9,7 @@ from apps.api.routers.dashboard import dashboard_router
 from apps.api.routers.healts import health_router
 from apps.api.routers.meetings import meetings_router
 from apps.api.routers.node import node_router
+from apps.api.routers.session_update import session_update_router
 
 
 @asynccontextmanager
@@ -47,8 +50,17 @@ async def lifespan(
     except asyncio.CancelledError:
         print("[Lifespan] Transcription monitor cancelled")
 
+web_ui_enabled = os.getenv("BOT_WEB_UI_ENABLED", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 app = FastAPI(
     lifespan=lifespan,
+    docs_url="/docs" if web_ui_enabled else None,
+    redoc_url="/redoc" if web_ui_enabled else None,
 )
 
 app.include_router(
@@ -60,9 +72,10 @@ app.include_router(
 app.include_router(
     router=config_router
 )
-app.include_router(
-    router=dashboard_router
-)
+if web_ui_enabled:
+    app.include_router(
+        router=dashboard_router
+    )
 app.include_router(
     router=bots_router
 )
@@ -71,6 +84,9 @@ app.include_router(
 )
 app.include_router(
     router=node_router
+)
+app.include_router(
+    router=session_update_router
 )
 
 

@@ -335,9 +335,19 @@ def _remote_error_message(error: object) -> str:
 
 
 def _is_no_turn_level_transcript(result: dict) -> bool:
-    message = _remote_error_message(result.get("error")).lower()
-    return "no turn-level transcript" in message or "returned no turn-level transcript" in message
-
+    error = result.get('error')
+    code = ''
+    if isinstance(error, dict):
+        code = str(error.get('code') or '').lower()
+    message = _remote_error_message(error).lower()
+    return (
+        code == 'no_speech_detected'
+        or 'no_speech_detected' in message
+        or 'no speech detected' in message
+        or 'did not detect speech' in message
+        or 'no turn-level transcript' in message
+        or 'returned no turn-level transcript' in message
+    )
 
 def write_empty_remote_transcript(audio_path: Path, job_id: str, result: dict) -> Path:
     transcript_path = remote_transcript_path(audio_path, f"{job_id}_no_speech")

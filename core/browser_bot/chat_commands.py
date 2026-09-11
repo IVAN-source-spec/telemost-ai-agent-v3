@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from core.browser_bot.participants_summary import ParticipantsSummaryBuilder
 
 
 class ChatCommandsModule:
+    ADD_AGENDA_COMMAND = "#добавить повестку"
     COMMAND_DESCRIPTION_COMMANDS = ("#\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435 \u043a\u043e\u043c\u0430\u043d\u0434",)
     EXIT_BOT_COMMANDS = ("#\u0432\u044b\u0445\u043e\u0434 \u0431\u043e\u0442\u0430",)
     DELETE_PARTICIPANTS_PREFIXES = ("#\u0443\u0434\u0430\u043b\u0438\u0442\u044c \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432",)
@@ -54,6 +56,24 @@ class ChatCommandsModule:
         self._startup_anchor_seen = False
         self._startup_anchor_wait_scans = 0
         self._confidential_mode: str | None = None
+        self._agenda_submission_task: asyncio.Task | None = None
+        self._agenda_submission_author: str | None = None
+        self._agenda_submission_deadline: float | None = None
+        self._agenda_submission_timeout_seconds = int(
+            os.getenv("TELEMOST_CHAT_AGENDA_SUBMISSION_TIMEOUT_SECONDS", "120")
+        )
+        self._recent_command_times: dict[str, float] = {}
+        self._command_dedup_seconds = max(
+            0.0,
+            float(os.getenv("TELEMOST_COMMAND_DEDUP_SECONDS", "5")),
+        )
+        self._recent_service_message_times: dict[str, float] = {}
+        self._service_message_send_lock = asyncio.Lock()
+        self._startup_message_complete = asyncio.Event()
+        self._outgoing_message_dedup_seconds = max(
+            0.0,
+            float(os.getenv("TELEMOST_OUTGOING_MESSAGE_DEDUP_SECONDS", "20")),
+        )
 
     async def run_probe(self) -> Path:
         self.logger("[Bot] Chat commands module enabled")
@@ -66,6 +86,9 @@ class ChatCommandsModule:
         await self._send_startup_message()
         self._start_message_monitor()
         return self._messages_path()
+
+    async def wait_for_startup_message(self) -> None:
+        await self._startup_message_complete.wait()
 
 
     async def handle_command_text(
@@ -87,9 +110,35 @@ class ChatCommandsModule:
                 "_message_key": command_key,
                 "author": source,
                 "time": "",
+                "_external_source": source,
             }
         ])
         return command_key in self._handled_command_keys or len(self._handled_command_keys) > before_count
+
+    def _is_duplicate_command(self, text: str, source: str) -> bool:
+        normalized = self._normalize_message_text(text).casefold()
+        if not normalized.startswith("#") or self._command_dedup_seconds <= 0:
+            return False
+
+        now = time.monotonic()
+        last_seen = self._recent_command_times.get(normalized)
+        duplicate = (
+            last_seen is not None
+            and now - last_seen < self._command_dedup_seconds
+        )
+        if not duplicate:
+            self._recent_command_times[normalized] = now
+        for command, seen_at in list(self._recent_command_times.items()):
+            if now - seen_at > self._command_dedup_seconds * 4:
+                self._recent_command_times.pop(command, None)
+
+        if duplicate:
+            self.logger(
+                f"[Bot] Duplicate command suppressed across sources: "
+                f"{normalized!r} from {source}; "
+                f"{now - last_seen:.1f}s since previous input"
+            )
+        return duplicate
 
     async def _capture_existing_messages_baseline(self) -> None:
         try:
@@ -158,38 +207,41 @@ class ChatCommandsModule:
     async def _send_startup_message(self) -> None:
         message = self._startup_message_text()
         self._startup_anchor_text = self._normalize_message_text(message)
-        if not message:
-            self._startup_anchor_seen = True
-            return
-
         try:
+            if not message:
+                self._startup_anchor_seen = True
+                return
             before_count = await self._message_text_occurrence_count(message)
-            last_result = "not attempted"
-            for attempt in range(1, 4):
-                send_result = await self._send_service_message(message)
-                last_result = send_result
-                await self.page.wait_for_timeout(1200)
-                after_count = await self._message_text_occurrence_count(message)
-                self.logger(
-                    f"[Bot] Chat startup message result: {send_result}; "
-                    f"visible matches {before_count}->{after_count}; attempt {attempt}/3"
-                )
-                if after_count > before_count or await self._latest_visible_message_matches(message):
-                    self._startup_anchor_sent = True
-                    return
-                await self.page.wait_for_timeout(1500)
+            send_result = await self._send_service_message(
+                message,
+                deduplicate=True,
+                suppress_unverified_retry=True,
+            )
+            await self.page.wait_for_timeout(1200)
+            after_count = await self._message_text_occurrence_count(message)
+            visible = after_count > before_count or await self._latest_visible_message_matches(message)
+            may_have_succeeded = self._service_message_send_may_have_succeeded(send_result)
+            self.logger(
+                f"[Bot] Chat startup message result: {send_result}; "
+                f"visible matches {before_count}->{after_count}; single send pipeline"
+            )
+            if visible or may_have_succeeded:
+                self._startup_anchor_sent = True
+                return
             self._startup_anchor_sent = False
             await self._capture_existing_messages_baseline()
             self._startup_anchor_seen = False
             self.logger(
                 f"[Bot] Chat command session anchor is waiting because startup message was not visible; "
-                f"last result: {last_result}"
+                f"last result: {send_result}"
             )
         except Exception as error:
             self.logger(f"[Bot] Chat startup message failed: {error}")
             await self._capture_existing_messages_baseline()
             self._startup_anchor_seen = False
             self.logger("[Bot] Chat command session anchor is waiting after startup message failure")
+        finally:
+            self._startup_message_complete.set()
 
     async def _message_text_occurrence_count(self, message: str) -> int:
         expected = self._normalize_message_text(message)
@@ -243,6 +295,8 @@ class ChatCommandsModule:
                 "#пропустить текущий вопрос",
                 "#пропустить вопрос №",
             ])
+        else:
+            command_lines.append(self.ADD_AGENDA_COMMAND)
         default_message = "\n".join(command_lines)
         message = os.getenv("TELEMOST_CHAT_COMMANDS_STARTUP_MESSAGE", default_message).strip()
         extra_commands = [
@@ -256,6 +310,14 @@ class ChatCommandsModule:
         for command in extra_commands:
             if command not in message:
                 message = (message + "\n" + command).strip()
+        if self.agenda_enabled:
+            message = "\n".join(
+                line
+                for line in message.splitlines()
+                if self._normalize_message_text(line).casefold() != self.ADD_AGENDA_COMMAND.casefold()
+            ).strip()
+        elif self.ADD_AGENDA_COMMAND not in message:
+            message = (message + "\n" + self.ADD_AGENDA_COMMAND).strip()
         return message
 
     def _command_description_text(self) -> str:
@@ -293,6 +355,18 @@ class ChatCommandsModule:
             "#\u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043f\u043e\u0447\u0442\u044b \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430 <\u0438\u043c\u044f> - <email>",
             "\u041d\u0430\u0437\u043d\u0430\u0447\u0430\u0435\u0442 \u0438\u043b\u0438 \u0437\u0430\u043c\u0435\u043d\u044f\u0435\u0442 email \u0443 \u0443\u0436\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043d\u043e\u0433\u043e \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430. \u041f\u0440\u0438\u043c\u0435\u0440: #\u0438\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435 \u043f\u043e\u0447\u0442\u044b \u043f\u0440\u0435\u0434\u043f\u043e\u043b\u0430\u0433\u0430\u0435\u043c\u043e\u0433\u043e \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0430 \u0418\u0432\u0430\u043d \u0421\u043b\u0430\u0432\u0438\u043d\u0441\u043a\u0438\u0439 - ivan@example.com.",
         ]
+        if not self.agenda_enabled:
+            lines.extend([
+                "",
+                "#добавить повестку",
+                "Добавляет повестку во время встречи. Можно передать повестку в этом же сообщении после команды или отправить ее следующим сообщением.",
+                "Формат такой же, как в описании встречи. Время и материалы необязательны; материалы отделяются символом |:",
+                "###Повестка:",
+                "#1. Первый вопрос - 00:10:00 | Материалы: https://example.com",
+                "#2. Второй вопрос | Материалы: документ и ссылка",
+                "#3. Третий вопрос",
+                "###",
+            ])
         if self.agenda_enabled:
             lines.extend([
                 "",
@@ -317,8 +391,8 @@ class ChatCommandsModule:
                 "#назначить время №3 20",
                 "Назначает или переназначает плановое время для незавершенного вопроса. Форматы: 20 минут, 1:20 - 1 час 20 минут, 1:20:30 - 1 час 20 минут 30 секунд.",
                 "",
-                "#добавить вопрос Название вопроса - 20",
-                "Добавляет новый вопрос в конец повестки. Время указывать необязательно, формат такой же: минуты, часы:минуты или часы:минуты:секунды.",
+                "#добавить вопрос Название вопроса - 20 | Материалы: ссылка",
+                "Добавляет новый вопрос в конец повестки. Время и материалы необязательны. Без времени: #добавить вопрос Название вопроса | Материалы: ссылка.",
                 "",
                 "#пропустить текущий вопрос",
                 "Помечает текущий вопрос как пропущенный участником и переводит повестку на следующий незавершенный вопрос.",
@@ -328,24 +402,88 @@ class ChatCommandsModule:
             ])
         return "\n".join(lines)
 
-    async def _send_service_message(self, message: str) -> str:
+    async def _send_service_message(
+        self,
+        message: str,
+        *,
+        deduplicate: bool = True,
+        suppress_unverified_retry: bool = True,
+    ) -> str:
+        async with self._service_message_send_lock:
+            return await self._send_service_message_unlocked(
+                message,
+                deduplicate=deduplicate,
+                suppress_unverified_retry=suppress_unverified_retry,
+            )
+
+    async def _send_service_message_unlocked(
+        self,
+        message: str,
+        *,
+        deduplicate: bool = True,
+        suppress_unverified_retry: bool = True,
+    ) -> str:
         normalized = self._normalize_message_text(message)
+        if deduplicate and self._is_duplicate_service_message(normalized):
+            return "duplicate outgoing service message suppressed"
+
         before_count = await self._message_text_occurrence_count(message)
         last_result = "not attempted"
         for attempt in range(1, 4):
             result = await self._send_message_to_chat(message)
             last_result = result
-            self._bot_sent_texts.add(normalized)
             await self.page.wait_for_timeout(1200)
             after_count = await self._message_text_occurrence_count(message)
             if after_count > before_count or await self._latest_visible_message_matches(message):
+                if deduplicate:
+                    self._mark_service_message_attempt(normalized)
+                    self._bot_sent_texts.add(normalized)
                 return result if attempt == 1 else f"{result}; verified on attempt {attempt}"
             self.logger(
                 f"[Bot] Service message was not visible after attempt {attempt}/3: "
                 f"{result}; matches {before_count}->{after_count}"
             )
+            if suppress_unverified_retry and self._service_message_send_may_have_succeeded(result):
+                return f"{result}; duplicate retry suppressed after unverified send"
             await self.page.wait_for_timeout(1200)
         return f"{last_result}; message was not visible after retries"
+
+    def _service_message_dedup_key(self, message: str) -> str:
+        return self._normalize_message_text(message).casefold()
+
+    def _is_duplicate_service_message(self, normalized_message: str) -> bool:
+        if self._outgoing_message_dedup_seconds <= 0:
+            return False
+        key = self._service_message_dedup_key(normalized_message)
+        if not key:
+            return False
+        now = time.monotonic()
+        last_seen = self._recent_service_message_times.get(key)
+        duplicate = last_seen is not None and now - last_seen < self._outgoing_message_dedup_seconds
+        for existing_key, seen_at in list(self._recent_service_message_times.items()):
+            if now - seen_at > self._outgoing_message_dedup_seconds * 4:
+                self._recent_service_message_times.pop(existing_key, None)
+        if duplicate:
+            self.logger(
+                f"[Bot] Duplicate outgoing service message suppressed: "
+                f"{key!r}; {now - last_seen:.1f}s since previous send attempt"
+            )
+        return duplicate
+
+    def _mark_service_message_attempt(self, normalized_message: str) -> None:
+        key = self._service_message_dedup_key(normalized_message)
+        if key:
+            self._recent_service_message_times[key] = time.monotonic()
+
+    @staticmethod
+    def _service_message_send_may_have_succeeded(result: str) -> bool:
+        lowered = str(result or "").casefold()
+        hard_failures = (
+            "chat iframe not found",
+            "message editor not found",
+            "send button not found",
+        )
+        return not any(failure in lowered for failure in hard_failures)
 
     async def _send_message_to_chat(self, message: str) -> str:
         chat_frame = await self._wait_for_chat_frame(timeout_ms=10000)
@@ -703,6 +841,44 @@ class ChatCommandsModule:
                 continue
 
             text = str(message.get("text", ""))
+            external_source = str(message.get("_external_source") or "")
+            source = external_source or "chat"
+            if self._is_duplicate_command(text, source):
+                self._handled_command_keys.add(key)
+                continue
+
+            is_chat_source = not bool(external_source)
+            add_agenda_command, agenda_payload = self._parse_add_agenda_command(text)
+            if (is_chat_source or external_source == "voice") and add_agenda_command:
+                self._handled_command_keys.add(key)
+                if self.agenda_enabled:
+                    result = await self._send_service_message(
+                        "Повестка уже добавлена, повторная команда не выполнена."
+                    )
+                    self.logger(f"[Bot] Duplicate add agenda response result: {result}")
+                elif self._agenda_submission_task is not None and not self._agenda_submission_task.done():
+                    await self._send_service_message("Повестка уже обрабатывается. Дождитесь результата.")
+                elif agenda_payload:
+                    await self._submit_agenda_from_chat(
+                        agenda_payload,
+                        message,
+                        keep_waiting=False,
+                    )
+                else:
+                    self._start_agenda_submission_wait(message)
+                    result = await self._send_service_message(self._agenda_submission_prompt())
+                    self.logger(f"[Bot] Agenda submission prompt result: {result}")
+                continue
+
+            if (
+                is_chat_source
+                and not self.agenda_enabled
+                and self._is_waiting_for_agenda_from(message)
+            ):
+                self._handled_command_keys.add(key)
+                await self._submit_agenda_from_chat(text, message, keep_waiting=True)
+                continue
+
             if self._is_command_description_command(text):
                 self._handled_command_keys.add(key)
                 response = self._command_description_text()
@@ -713,7 +889,14 @@ class ChatCommandsModule:
             if self._is_exit_bot_command(text):
                 self._handled_command_keys.add(key)
                 response = self._exit_bot_response()
-                result = await self._send_service_message(response)
+                # The bot is about to close the meeting page, so an ambiguous send
+                # must be retried instead of being suppressed as a possible duplicate.
+                # _send_service_message completes after a verified send or after all
+                # three attempts, and only then do we raise the exit request below.
+                result = await self._send_service_message(
+                    response,
+                    suppress_unverified_retry=False,
+                )
                 self.logger(f"[Bot] Exit command response result: {result}")
                 await self._notify_confidential_event("exit_requested", "", "exit")
                 continue
@@ -1120,6 +1303,160 @@ class ChatCommandsModule:
         return " ".join(parts) if parts else "\u0423\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0435 \u0443\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u044e\u0442 \u0432 \u0437\u0432\u043e\u043d\u043a\u0435."
 
 
+    def _parse_add_agenda_command(self, text: str) -> tuple[bool, str | None]:
+        match = re.match(
+            re.escape(self.ADD_AGENDA_COMMAND) + r"(?=$|[\s:])\s*:?\s*(.*)$",
+            text.strip(), re.IGNORECASE | re.DOTALL,
+        )
+        if match is None:
+            return False, None
+        return True, match.group(1).strip() or None
+
+    @staticmethod
+    def _agenda_message_author(message: dict) -> str:
+        return " ".join(str(message.get("author") or "").strip().lower().split())
+
+    def _start_agenda_submission_wait(self, message: dict) -> None:
+        self._agenda_submission_author = self._agenda_message_author(message)
+        self._agenda_submission_deadline = (
+            datetime.now(timezone.utc).timestamp() + self._agenda_submission_timeout_seconds
+        )
+        self.logger(
+            f"[Bot] Waiting for agenda from chat author: "
+            f"{message.get('author') or '<unknown>'}"
+        )
+
+    def _clear_agenda_submission_wait(self) -> None:
+        self._agenda_submission_author = None
+        self._agenda_submission_deadline = None
+
+    def _is_waiting_for_agenda_from(self, message: dict) -> bool:
+        if self._agenda_submission_deadline is None:
+            return False
+        if datetime.now(timezone.utc).timestamp() > self._agenda_submission_deadline:
+            self.logger("[Bot] Chat agenda submission wait expired")
+            self._clear_agenda_submission_wait()
+            return False
+        return self._agenda_message_author(message) == (self._agenda_submission_author or "")
+
+    @staticmethod
+    def _agenda_submission_prompt() -> str:
+        return (
+            "Отправьте повестку следующим сообщением в произвольном виде или в формате:\n"
+            "Чтобы передать её голосом, скажите «Начало повестки», продиктуйте текст, затем скажите «Конец повестки».\n"
+            "###Повестка:\n"
+            "#1. Первый вопрос - 00:10:00 | Материалы: https://example.com\n"
+            "#2. Второй вопрос | Материалы: документ и ссылка\n"
+            "#3. Третий вопрос\n"
+            "###\n"
+            "Время и материалы необязательны; материалы отделяются символом |."
+        )
+
+    @staticmethod
+    def _invalid_agenda_response(error: str | None) -> str:
+        reason = error or "не удалось распознать пункты"
+        return (
+            f"Не удалось добавить повестку: {reason}.\n"
+            "Используйте формат:\n"
+            "###Повестка:\n"
+            "#1. Первый вопрос - 00:10:00 | Материалы: https://example.com\n"
+            "#2. Второй вопрос | Материалы: документ и ссылка\n"
+            "#3. Третий вопрос\n"
+            "###\n"
+            "Время и материалы необязательны; материалы отделяются символом |."
+        )
+
+    async def _submit_agenda_from_chat(self, raw_agenda: str, message: dict, keep_waiting: bool) -> None:
+        if self._agenda_submission_task is not None and not self._agenda_submission_task.done():
+            await self._send_service_message("Повестка уже обрабатывается. Дождитесь результата.")
+            return
+        async def process():
+            try:
+                if self.page.is_closed():
+                    return
+                await self._process_agenda_from_chat(raw_agenda, message, keep_waiting)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Do not expose input text, provider responses or credentials in the chat.
+                if not self.agenda_enabled and not self.page.is_closed():
+                    if keep_waiting:
+                        self._start_agenda_submission_wait(message)
+                    await self._send_service_message("ИИ временно недоступен. Попробуйте отправить повестку позже.")
+            finally:
+                # Permit an immediate retry of the same one-command submission.
+                self._recent_command_times.pop(self._normalize_message_text(
+                    str(message.get("text") or "")).casefold(), None)
+        self._agenda_submission_task = asyncio.create_task(process())
+
+    async def _announce_agenda_ai_processing(self) -> None:
+        if self.agenda_enabled or self.page.is_closed():
+            return
+        text = "Повестка отправлена в ИИ для обработки. Подождите немного."
+        self._recent_service_message_times.pop(self._service_message_dedup_key(text), None)
+        await self._send_service_message(text)
+
+    async def _process_agenda_from_chat(
+        self,
+        raw_agenda: str,
+        message: dict,
+        keep_waiting: bool,
+    ) -> None:
+        agenda_result = await self._notify_agenda_event(
+            "activate_agenda",
+            raw_agenda=raw_agenda,
+            source="chat",
+            author=str(message.get("author") or ""),
+            on_ai_processing=self._announce_agenda_ai_processing,
+        )
+        status = (agenda_result or {}).get("status")
+        if status == "meeting_ended" or self.page.is_closed():
+            return
+        if status != "agenda_activated" and self.agenda_enabled:
+            # Another source announced its agenda while this request was in flight.
+            return
+        if status == "agenda_activated":
+            self.agenda_enabled = True
+            self._clear_agenda_submission_wait()
+            response = self._agenda_activated_commands_text(agenda_result or {})
+            result = await self._send_service_message(response)
+            self.logger(f"[Bot] Agenda activated chat response result: {result}")
+            await self._notify_agenda_event("agenda_commands_announced", source="chat")
+            return
+        if status == "already_active":
+            self.agenda_enabled = True
+            self._clear_agenda_submission_wait()
+            result = await self._send_service_message(
+                "Повестка уже добавлена, повторная команда не выполнена."
+            )
+            self.logger(f"[Bot] Duplicate agenda activation response result: {result}")
+            return
+
+        if keep_waiting:
+            self._start_agenda_submission_wait(message)
+        else:
+            self._clear_agenda_submission_wait()
+        messages = {
+            "agenda_not_found": "Повестка не найдена в переданном тексте. Уточните её и отправьте повторно.",
+            "ai_unavailable": "ИИ временно недоступен. Попробуйте отправить повестку позже.",
+            "invalid_ai_result": "Не удалось корректно обработать повестку. Уточните текст и отправьте повторно.",
+            "processing": "Повестка уже обрабатывается. Дождитесь результата.",
+        }
+        response = messages.get(status, "Не удалось добавить повестку. Попробуйте отправить её повторно.")
+        self._recent_service_message_times.pop(self._service_message_dedup_key(response), None)
+        result = await self._send_service_message(response)
+        self.logger(f"[Bot] Invalid agenda response result: {result}")
+
+    def _agenda_activated_commands_text(self, agenda_result: dict) -> str:
+        count = int(agenda_result.get("items_count") or 0)
+        command_message = self._startup_message_text()
+        lines = command_message.splitlines()
+        status_line = f"Повестка добавлена: {count} пункт(ов)."
+        if lines and lines[0].strip() == "Бот подключен.":
+            lines[0] = status_line
+            return "\n".join(lines)
+        return status_line + "\n" + command_message
+
     def _is_command_description_command(self, text: str) -> bool:
         normalized = self._normalize_message_text(text).lower()
         return normalized in self.COMMAND_DESCRIPTION_COMMANDS
@@ -1215,15 +1552,23 @@ class ChatCommandsModule:
             self.logger(f"[Bot] Agenda event handler failed ({stage}): {error}")
             return {"status": "failed", "message": str(error)}
 
+    @staticmethod
+    def _agenda_response_with_materials(message: str, result: dict) -> str:
+        materials = " ".join(str(result.get("materials") or "").strip().split())
+        if not materials:
+            return message
+        return f"{message}\nМатериалы: {materials}"
+
     def _agenda_response(self, result: dict | None) -> str:
         if not result:
             return ""
         status = result.get("status")
         if status == "switched":
-            return (
+            response = (
                 "Перехожу к вопросу "
                 f"{result.get('index')}/{result.get('total')}: {result.get('title')}"
             )
+            return self._agenda_response_with_materials(response, result)
         if status == "items":
             return self._agenda_items_response(result)
         if status == "time_assigned":
@@ -1233,7 +1578,8 @@ class ChatCommandsModule:
             )
         if status == "question_added":
             plan = result.get("planned_time") or "без времени"
-            return f"Добавил вопрос №{result.get('number')}: {result.get('title')} — план: {plan}"
+            response = f"Добавил вопрос №{result.get('number')}: {result.get('title')} — план: {plan}"
+            return self._agenda_response_with_materials(response, result)
         if status == "invalid_question":
             return "Не смог добавить вопрос: текст вопроса пустой."
         if status == "question_skipped":
@@ -1258,7 +1604,8 @@ class ChatCommandsModule:
         if status == "invalid_time":
             return "Не смог распознать время. Используйте формат: #назначить время №3 10:30"
         if status == "already_active":
-            return f"Вопрос уже активен: {result.get('index')}/{result.get('total')}: {result.get('title')}"
+            response = f"Вопрос уже активен: {result.get('index')}/{result.get('total')}: {result.get('title')}"
+            return self._agenda_response_with_materials(response, result)
         if status == "not_found":
             return f"В повестке нет вопроса №{result.get('number')}."
         if status == "locked":
@@ -1301,6 +1648,9 @@ class ChatCommandsModule:
             actual = item.get("actual_time") or "0:00"
             status = self._agenda_status_label(str(item.get("status") or ""), bool(item.get("locked")))
             lines.append(f"№{item.get('number')}. {item.get('title')} — план: {plan}, факт: {actual}, статус: {status}")
+            materials = " ".join(str(item.get("materials") or "").strip().split())
+            if materials:
+                lines.append(f"  Материалы: {materials}")
         return "\n".join(lines)
 
     @staticmethod
