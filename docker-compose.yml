@@ -6,7 +6,7 @@ services:
     container_name: telemost-bot-1
     restart: unless-stopped
     env_file:
-      - .env
+    - .env
     environment:
       PULSE_SERVER: unix:/run/user/1002/pulse/native
       PULSE_SINK: virtual_sink_bot_1
@@ -14,34 +14,30 @@ services:
       TELEMOST_AUDIO_SOURCE_NAME: virtual_sink_bot_1.monitor
       TELEMOST_AUTH_STATE_PATH: data/auth/yandex-session.json
       TELEMOST_AUTH_COOKIES_PATH: data/auth/cookies.json
-      TELEMOST_BOT_POOL_SIZE: "1"
-      BOT_NODE_ID: telemost-vm-3-bot-1
-      BOT_NODE_NAME: "Третья VM Bot 1"
-      VOICE_COMMANDS_SERVICE_URL: ws://host.docker.internal:8020/ws/audio
+      TELEMOST_BOT_POOL_SIZE: '1'
+      BOT_NODE_ID: telemost-vm-2-bot-1
+      BOT_NODE_NAME: VM2 Bot 1
+      VOICE_COMMANDS_SERVICE_URL: ws://192.168.101.68:8020/ws/audio
+      SESSION_UPDATE_ENABLED: '1'
+      SESSION_UPDATE_TARGET_ID: telemost-vm-2-bot-1
+      SESSION_UPDATE_API_TOKEN: ${SESSION_UPDATE_API_TOKEN}
+      SESSION_UPDATE_ENCRYPTION_KEY: ${SESSION_UPDATE_ENCRYPTION_KEY}
+      SESSION_UPDATE_MAX_PLAINTEXT_BYTES: '2097152'
     command:
-      - sh
-      - -lc
-      - >
-        rm -f /tmp/.X99-lock /tmp/.X11-unix/X99;
-        Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp &
-        for n in $(seq 1 40); do
-          [ -S /tmp/.X11-unix/X99 ] && break;
-          sleep 0.25;
-        done;
-        export DISPLAY=:99;
-        exec python api_run.py
+    - sh
+    - -lc
+    - "/app/scripts/ensure_audio_sink.sh; rm -f /tmp/.X99-lock /tmp/.X11-unix/X99; Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp & for n in $(seq 1 40); do\n  [ -S /tmp/.X11-unix/X99 ] && break;\n  sleep 0.25;\ndone; export DISPLAY=:99; exec python api_run.py\n"
     ports:
-      - "8001:8000"
+    - 8001:8000
     volumes:
-      - ./data/auth:/app/data/auth:ro
-      - ./recordings/bot-1:/app/recordings
-      - ./yandex_disk_upload_errors_bot_1.jsonl:/app/yandex_disk_upload_errors.jsonl
-      - /run/user/1002/pulse/native:/run/user/1002/pulse/native
-      - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
+    - ./data/auth:/app/data/auth
+    - ./recordings/bot-1:/app/recordings
+    - ./yandex_disk_upload_errors_bot_1.jsonl:/app/yandex_disk_upload_errors.jsonl
+    - /run/user/1002/pulse/native:/run/user/1002/pulse/native
+    - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
     extra_hosts:
-      - "host.docker.internal:host-gateway"
-    shm_size: "2gb"
-
+    - host.docker.internal:host-gateway
+    shm_size: 2gb
   telemost-bot-2:
     build:
       context: .
@@ -49,7 +45,7 @@ services:
     container_name: telemost-bot-2
     restart: unless-stopped
     env_file:
-      - .env
+    - .env
     environment:
       PULSE_SERVER: unix:/run/user/1002/pulse/native
       PULSE_SINK: virtual_sink_bot_2
@@ -57,34 +53,25 @@ services:
       TELEMOST_AUDIO_SOURCE_NAME: virtual_sink_bot_2.monitor
       TELEMOST_AUTH_STATE_PATH: data/auth/yandex-session.json
       TELEMOST_AUTH_COOKIES_PATH: data/auth/cookies.json
-      TELEMOST_BOT_POOL_SIZE: "1"
-      BOT_NODE_ID: telemost-vm-3-bot-2
-      BOT_NODE_NAME: "Третья VM Bot 2"
-      VOICE_COMMANDS_SERVICE_URL: ws://host.docker.internal:8020/ws/audio
+      TELEMOST_BOT_POOL_SIZE: '1'
+      BOT_NODE_ID: telemost-vm-2-bot-2
+      BOT_NODE_NAME: VM2 Bot 2
+      VOICE_COMMANDS_SERVICE_URL: ws://192.168.101.68:8020/ws/audio
     command:
-      - sh
-      - -lc
-      - >
-        rm -f /tmp/.X99-lock /tmp/.X11-unix/X99;
-        Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp &
-        for n in $(seq 1 40); do
-          [ -S /tmp/.X11-unix/X99 ] && break;
-          sleep 0.25;
-        done;
-        export DISPLAY=:99;
-        exec python api_run.py
+    - sh
+    - -lc
+    - "/app/scripts/ensure_audio_sink.sh; rm -f /tmp/.X99-lock /tmp/.X11-unix/X99; Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp & for n in $(seq 1 40); do\n  [ -S /tmp/.X11-unix/X99 ] && break;\n  sleep 0.25;\ndone; export DISPLAY=:99; exec python api_run.py\n"
     ports:
-      - "8002:8000"
+    - 8002:8000
     volumes:
-      - ./data/auth:/app/data/auth:ro
-      - ./recordings/bot-2:/app/recordings
-      - ./yandex_disk_upload_errors_bot_2.jsonl:/app/yandex_disk_upload_errors.jsonl
-      - /run/user/1002/pulse/native:/run/user/1002/pulse/native
-      - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
+    - ./data/auth:/app/data/auth:ro
+    - ./recordings/bot-2:/app/recordings
+    - ./yandex_disk_upload_errors_bot_2.jsonl:/app/yandex_disk_upload_errors.jsonl
+    - /run/user/1002/pulse/native:/run/user/1002/pulse/native
+    - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
     extra_hosts:
-      - "host.docker.internal:host-gateway"
-    shm_size: "2gb"
-
+    - host.docker.internal:host-gateway
+    shm_size: 2gb
   telemost-bot-3:
     build:
       context: .
@@ -92,7 +79,7 @@ services:
     container_name: telemost-bot-3
     restart: unless-stopped
     env_file:
-      - .env
+    - .env
     environment:
       PULSE_SERVER: unix:/run/user/1002/pulse/native
       PULSE_SINK: virtual_sink_bot_3
@@ -100,34 +87,25 @@ services:
       TELEMOST_AUDIO_SOURCE_NAME: virtual_sink_bot_3.monitor
       TELEMOST_AUTH_STATE_PATH: data/auth/yandex-session.json
       TELEMOST_AUTH_COOKIES_PATH: data/auth/cookies.json
-      TELEMOST_BOT_POOL_SIZE: "1"
-      BOT_NODE_ID: telemost-vm-3-bot-3
-      BOT_NODE_NAME: "Третья VM Bot 3"
-      VOICE_COMMANDS_SERVICE_URL: ws://host.docker.internal:8020/ws/audio
+      TELEMOST_BOT_POOL_SIZE: '1'
+      BOT_NODE_ID: telemost-vm-2-bot-3
+      BOT_NODE_NAME: VM2 Bot 3
+      VOICE_COMMANDS_SERVICE_URL: ws://192.168.101.68:8020/ws/audio
     command:
-      - sh
-      - -lc
-      - >
-        rm -f /tmp/.X99-lock /tmp/.X11-unix/X99;
-        Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp &
-        for n in $(seq 1 40); do
-          [ -S /tmp/.X11-unix/X99 ] && break;
-          sleep 0.25;
-        done;
-        export DISPLAY=:99;
-        exec python api_run.py
+    - sh
+    - -lc
+    - "/app/scripts/ensure_audio_sink.sh; rm -f /tmp/.X99-lock /tmp/.X11-unix/X99; Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp & for n in $(seq 1 40); do\n  [ -S /tmp/.X11-unix/X99 ] && break;\n  sleep 0.25;\ndone; export DISPLAY=:99; exec python api_run.py\n"
     ports:
-      - "8003:8000"
+    - 8003:8000
     volumes:
-      - ./data/auth:/app/data/auth:ro
-      - ./recordings/bot-3:/app/recordings
-      - ./yandex_disk_upload_errors_bot_3.jsonl:/app/yandex_disk_upload_errors.jsonl
-      - /run/user/1002/pulse/native:/run/user/1002/pulse/native
-      - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
+    - ./data/auth:/app/data/auth:ro
+    - ./recordings/bot-3:/app/recordings
+    - ./yandex_disk_upload_errors_bot_3.jsonl:/app/yandex_disk_upload_errors.jsonl
+    - /run/user/1002/pulse/native:/run/user/1002/pulse/native
+    - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
     extra_hosts:
-      - "host.docker.internal:host-gateway"
-    shm_size: "2gb"
-
+    - host.docker.internal:host-gateway
+    shm_size: 2gb
   telemost-node-dashboard:
     build:
       context: .
@@ -135,15 +113,50 @@ services:
     container_name: telemost-node-dashboard
     restart: unless-stopped
     environment:
-      NODE_DASHBOARD_ID: telemost-vm-3-dashboard
-      NODE_DASHBOARD_TITLE: "Третья VM: общий дашборд ботов"
-      NODE_DASHBOARD_ENDPOINTS: "telemost-vm-3-bot-1|Третья VM Bot 1|http://telemost-bot-1:8000,telemost-vm-3-bot-2|Третья VM Bot 2|http://telemost-bot-2:8000,telemost-vm-3-bot-3|Третья VM Bot 3|http://telemost-bot-3:8000"
+      NODE_DASHBOARD_ID: telemost-vm-2-dashboard
+      NODE_DASHBOARD_TITLE: 'Вторая VM: общий дашборд ботов'
+      NODE_DASHBOARD_ENDPOINTS: telemost-vm-2-bot-1|VM2 Bot 1|http://telemost-bot-1:8000,telemost-vm-2-bot-2|VM2 Bot 2|http://telemost-bot-2:8000,telemost-vm-2-bot-3|VM2 Bot 3|http://telemost-bot-3:8000,telemost-vm-2-bot-4|VM2 Bot 4|http://telemost-bot-4:8000
     command:
-      - python
-      - node_dashboard.py
+    - python
+    - node_dashboard.py
     ports:
-      - "8000:8000"
+    - 127.0.0.1:8000:8000
     depends_on:
-      - telemost-bot-1
-      - telemost-bot-2
-      - telemost-bot-3
+    - telemost-bot-1
+    - telemost-bot-2
+    - telemost-bot-3
+    - telemost-bot-4
+  telemost-bot-4:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telemost-bot-4
+    restart: unless-stopped
+    env_file:
+    - .env
+    environment:
+      PULSE_SERVER: unix:/run/user/1002/pulse/native
+      PULSE_SINK: virtual_sink_bot_4
+      PULSE_SOURCE: virtual_sink_bot_4.monitor
+      TELEMOST_AUDIO_SOURCE_NAME: virtual_sink_bot_4.monitor
+      TELEMOST_AUTH_STATE_PATH: data/auth/yandex-session.json
+      TELEMOST_AUTH_COOKIES_PATH: data/auth/cookies.json
+      TELEMOST_BOT_POOL_SIZE: '1'
+      BOT_NODE_ID: telemost-vm-2-bot-4
+      BOT_NODE_NAME: VM2 Bot 4
+      VOICE_COMMANDS_SERVICE_URL: ws://192.168.101.68:8020/ws/audio
+    command:
+    - sh
+    - -lc
+    - "/app/scripts/ensure_audio_sink.sh; rm -f /tmp/.X99-lock /tmp/.X11-unix/X99; Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp & for n in $(seq 1 40); do\n  [ -S /tmp/.X11-unix/X99 ] && break;\n  sleep 0.25;\ndone; export DISPLAY=:99; exec python api_run.py\n"
+    ports:
+    - 8004:8000
+    volumes:
+    - ./data/auth:/app/data/auth:ro
+    - ./recordings/bot-4:/app/recordings
+    - ./yandex_disk_upload_errors_bot_4.jsonl:/app/yandex_disk_upload_errors.jsonl
+    - /run/user/1002/pulse/native:/run/user/1002/pulse/native
+    - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
+    extra_hosts:
+    - host.docker.internal:host-gateway
+    shm_size: 2gb

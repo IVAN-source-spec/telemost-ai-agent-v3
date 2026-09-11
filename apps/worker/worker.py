@@ -4,6 +4,7 @@ from pathlib import Path
 
 from apps.api.dependencies import bot_selector_instance, queue_publisher_instance
 from apps.api.task_store import update_task_status
+from apps.worker.runtime_registry import register_active_bot, unregister_active_bot
 from core.browser_bot.client import TelemostBot
 from core.transcription.speaker_count import target_speakers_for_audio
 
@@ -27,6 +28,7 @@ async def process_task(task_data):
 
     update_task_status(session_id, "running")
 
+    bot = None
     try:
         bot_headless = os.getenv("TELEMOST_BOT_HEADLESS", "false").lower() in (
             "1",
@@ -34,6 +36,7 @@ async def process_task(task_data):
             "yes",
         )
         bot = TelemostBot(headless=bot_headless, bot_id=bot_id)
+        register_active_bot(bot_id, session_id, bot)
         config = {
             "alone_leave_threshold": int(os.getenv("TELEMOST_ALONE_LEAVE_THRESHOLD_SECONDS", "20")),
             "reconnect_enabled": os.getenv("TELEMOST_RECONNECT_ENABLED", "1").lower() in (
@@ -116,7 +119,12 @@ async def process_task(task_data):
         update_task_status(session_id, "failed", result={"error": str(e)})
         print(f"[Worker] Task {session_id} failed: {e}")
     finally:
-        await bot_selector_instance.release_bot(bot_id)
+        if bot is not None:
+            bot.stop_voice_command_stream()
+        try:
+            unregister_active_bot(bot_id, bot)
+        finally:
+            await bot_selector_instance.release_bot(bot_id)
         print(f"[Worker] Released bot: {bot_id}")
 
 
