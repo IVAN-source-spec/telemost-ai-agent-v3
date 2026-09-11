@@ -2,6 +2,9 @@ import asyncio
 import builtins
 import json
 import os
+from threading import Event
+from core.browser_bot.single_participant import SingleParticipantMonitor
+from core.browser_bot.managed_audio import ManagedAudioActivityMonitor
 from urllib.parse import urlparse
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
@@ -28,6 +31,7 @@ class TelemostBot:
     VOICE_COMMANDS_WITHOUT_AGENDA = frozenset({
         "#описание команд",
         "#выход бота",
+        "#добавить повестку",
     })
 
     def __init__(
@@ -49,6 +53,7 @@ class TelemostBot:
         self.meeting_title = None
         self.agenda_text = None
         self.expected_participants_text = None
+        self.meeting_organizer = None
         self.agenda_tracker = None
         self._agenda_activation_lock = asyncio.Lock()
         self.meeting_artifacts: MeetingArtifacts | None = None
@@ -65,11 +70,20 @@ class TelemostBot:
         self.confidential_recording_active = False
         self.confidential_no_recording_leave_requested = False
         self.chat_exit_requested = False
+        self.dashboard_exit_requested = Event()
+        self.exit_reason = None
         self.participants_snapshot_module = None
         self.confidential_participants_snapshot_module = None
         self.reconnect_events = []
         self.auth_ok = False
         self._last_valid_participant_count = 0
+        self.other_participants_count: int | None = None
+        self.participant_count_valid = False
+        self.participant_count_measured_at = None
+        self.participant_count_last_valid_at = None
+        self.participant_count_error = None
+        self.single_participant_monitor = SingleParticipantMonitor(threshold_minutes=0)
+        self.audio_activity_monitor = ManagedAudioActivityMonitor()
         self.chat_commands_module = None
         self.voice_commands_client = None
         self.voice_service_status = "disabled"
@@ -343,6 +357,10 @@ class TelemostBot:
         parsed_meeting_url = urlparse(meeting_url)
         meeting_origin = f"{parsed_meeting_url.scheme}://{parsed_meeting_url.netloc}"
         await self.context.grant_permissions(["camera", "microphone"], origin=meeting_origin)
+        if parsed_meeting_url.hostname in {"telemost.yandex.ru", "telemost.360.yandex.ru"}:
+            for origin in ("https://telemost.yandex.ru", "https://telemost.360.yandex.ru"):
+                if origin != meeting_origin:
+                    await self.context.grant_permissions(["camera", "microphone"], origin=origin)
 
         await self.page.goto(meeting_url, wait_until="domcontentloaded", timeout=60000)
         self._print("[Bot] Navigated to meeting page")
@@ -380,7 +398,7 @@ class TelemostBot:
                             !!document.querySelector('[class*="participant"]');
                         return (
                             meetingUi ||
-                            (url.includes('telemost.yandex') && url.includes('/j/'))
+                            (['telemost.yandex.ru', 'telemost.360.yandex.ru'].includes(window.location.hostname) && window.location.pathname.startsWith('/j/'))
                         );
                     }''',
                     timeout=15000
@@ -469,7 +487,38 @@ class TelemostBot:
 
     async def _handle_agenda_event(self, stage: str, **payload) -> dict | None:
         if stage == "activate_agenda":
+            if payload.get("source") == "chat":
+                from .chat_agenda_ai import normalize_chat_agenda
+                session_id = self.session_id
+                payload["expected_session_id"] = session_id
+                if self.meeting_ended_at is not None:
+                    return {"status": "meeting_ended"}
+                if self.agenda_tracker is not None and self.agenda_tracker.enabled:
+                    return {"status": "already_active"}
+                raw = str(payload.get("raw_agenda") or "")
+                _, error = AgendaTracker.validate_agenda(raw)
+                if error:
+                    notify = payload.get("on_ai_processing")
+                    if notify is not None:
+                        await notify()
+                    if self.session_id != session_id or self.meeting_ended_at is not None:
+                        return {"status": "meeting_ended"}
+                    if self.agenda_tracker is not None and self.agenda_tracker.enabled:
+                        return {"status": "already_active"}
+                    reply = await asyncio.to_thread(normalize_chat_agenda, raw, self.bot_id, session_id)
+                    if self.session_id != session_id or self.meeting_ended_at is not None:
+                        return {"status": "meeting_ended"}
+                    if self.agenda_tracker is not None and self.agenda_tracker.enabled:
+                        return {"status": "already_active"}
+                    if reply.get("status") != "normalized":
+                        return reply
+                    payload["raw_agenda"] = str(reply.get("raw_agenda") or "")
             async with self._agenda_activation_lock:
+                expected_session_id = payload.get("expected_session_id")
+                if expected_session_id is not None and (
+                    self.session_id != expected_session_id or self.meeting_ended_at is not None
+                ):
+                    return {"status": "meeting_ended", "error": "Встреча завершилась или изменилась. Результат обработки удалён."}
                 result = self._activate_agenda_text(
                     str(payload.get("raw_agenda") or ""),
                     source=str(payload.get("source") or "unknown"),
@@ -737,6 +786,7 @@ class TelemostBot:
         payload = {
             "session_id": self.session_id,
             "title": self._meeting_artifacts().title,
+            "organizer": self.meeting_organizer,
             "started_at": self.meeting_started_at.isoformat(),
             "started_at_astrakhan": self._meeting_artifacts().started_at_local.isoformat(),
             "ended_at": self.meeting_ended_at.isoformat() if self.meeting_ended_at else None,
@@ -744,6 +794,7 @@ class TelemostBot:
             "duration_formatted": self._format_duration(self.meeting_duration_seconds),
             "reconnects": self.reconnect_events,
         }
+        payload["exit_reason"] = self.exit_reason
         path = self._meeting_artifacts().meeting_time_path
         path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -824,6 +875,7 @@ class TelemostBot:
     async def _handle_voice_service_payload(self, payload: dict) -> None:
         payload_type = payload.get("type")
         if payload_type == "voice_service_connected":
+            self.audio_activity_monitor.reset_audio()
             self.voice_service_status = "connected"
             self.voice_service_session_id = payload.get("session_id")
             vad = payload.get("vad") or {}
@@ -837,9 +889,17 @@ class TelemostBot:
             self._remember_voice_command_catalog(payload)
             self._write_voice_status_debug("voice_service_streaming", payload)
             self._print("[Bot] Voice command audio stream accepted")
+        elif payload_type == "audio_telemetry":
+            if payload.get("session_id") != self.voice_service_session_id:
+                return
+            single = self.single_participant_monitor.snapshot(
+                meeting_active=self.meeting_started_at is not None and self.meeting_ended_at is None)
+            self.audio_activity_monitor.update_participants(single)
+            self.audio_activity_monitor.receive(payload, self.session_id)
         elif payload_type == "vad_event":
             self._write_voice_status_debug(f"vad_{payload.get('event') or 'event'}", payload)
         elif payload_type == "session_stopped":
+            self.audio_activity_monitor.reset_audio()
             self.voice_service_status = "stopped"
             self._write_voice_status_debug("voice_service_stopped", payload)
         elif payload_type == "voice_agent_ready":
@@ -870,7 +930,27 @@ class TelemostBot:
                 )
         elif payload_type in {"voice_command", "voice_command_detected", "command", "command_detected"}:
             await self._handle_voice_command_payload(payload)
+        elif payload_type == "voice_agenda":
+            agenda_text = str(payload.get("agenda_text") or "").strip()
+            if not agenda_text:
+                self._write_voice_status_debug("voice_agenda_ignored", {"reason": "empty agenda"})
+                return
+            agenda_payload = dict(payload)
+            agenda_payload["command"] = f"#добавить повестку\n{agenda_text}"
+            agenda_payload["command_id"] = str(
+                payload.get("event_id")
+                or payload.get("id")
+                or payload.get("received_at")
+                or datetime.now(timezone.utc).isoformat()
+            )
+            await self._handle_voice_command_payload(agenda_payload)
+        elif payload_type == "voice_agenda_empty":
+            await self._send_voice_status_chat_message(
+                f"voice_agenda_empty:{payload.get('received_at') or ''}",
+                "Между маркерами «Начало повестки» и «Конец повестки» повестка не найдена. Повторите диктовку.",
+            )
         elif payload_type == "voice_service_unavailable":
+            self.audio_activity_monitor.reset_audio()
             self.voice_service_status = "unavailable"
             self._write_voice_status_debug("voice_service_unavailable", payload)
             self._print(f"[Bot] Voice command service unavailable: {payload.get('error')}")
@@ -904,6 +984,12 @@ class TelemostBot:
                 command
                 for command in commands
                 if " ".join(command.split()).casefold() in self.VOICE_COMMANDS_WITHOUT_AGENDA
+            ]
+        else:
+            commands = [
+                command
+                for command in commands
+                if " ".join(command.split()).casefold() != "#добавить повестку"
             ]
 
         if not commands:
@@ -977,37 +1063,29 @@ class TelemostBot:
                 self._write_voice_status_debug("voice_status_chat_message_pending", {"type": event_key, "message": message})
             return
         try:
+            await self.chat_commands_module.wait_for_startup_message()
             # The chat iframe may silently drop a message sent immediately after the startup text.
-            # Treat the message as sent only after it appears in the visible chat list.
+            # Keep startup and voice catalog messages strictly ordered and use one retry pipeline.
             await self.page.wait_for_timeout(1500)
-            last_result = "not attempted"
-            for attempt in range(1, 4):
-                result = await self.chat_commands_module._send_service_message(message)
-                last_result = result
-                await self.page.wait_for_timeout(1200)
-                if await self._voice_status_chat_message_is_visible(message):
-                    self._voice_status_chat_messages_sent.add(event_key)
-                    self._write_voice_status_debug("voice_status_chat_message_sent", {
-                        "type": event_key,
-                        "message": message,
-                        "result": result,
-                        "attempt": attempt,
-                        "verified_visible": True,
-                    })
-                    self._print(f"[Bot] Voice status chat message result: {result} (verified)")
-                    return
-                self._write_voice_status_debug("voice_status_chat_message_not_visible", {
+            result = await self.chat_commands_module._send_service_message(message)
+            await self.page.wait_for_timeout(1200)
+            visible = await self._voice_status_chat_message_is_visible(message)
+            may_have_succeeded = self.chat_commands_module._service_message_send_may_have_succeeded(result)
+            if visible or may_have_succeeded:
+                self._voice_status_chat_messages_sent.add(event_key)
+                self._write_voice_status_debug("voice_status_chat_message_sent", {
                     "type": event_key,
                     "message": message,
                     "result": result,
-                    "attempt": attempt,
+                    "verified_visible": visible,
                 })
-                await self.page.wait_for_timeout(1500)
+                self._print(f"[Bot] Voice status chat message result: {result}")
+                return
             self._write_voice_status_debug("voice_status_chat_message_failed", {
                 "type": event_key,
                 "message": message,
                 "error": "message was not visible after retries",
-                "last_result": last_result,
+                "last_result": result,
             })
             self._print("[Bot] Voice status chat message was not visible after retries")
         except Exception as error:
@@ -1134,6 +1212,7 @@ class TelemostBot:
             "session_id": self.session_id,
             "title": "\u041a\u043e\u043d\u0444\u0438\u0434\u0435\u043d\u0446\u0438\u0430\u043b\u044c\u043d\u0430\u044f \u0447\u0430\u0441\u0442\u044c",
             "parent_meeting_title": self._meeting_artifacts().title,
+            "organizer": self.meeting_organizer,
             "participants": self.confidential_participants,
             "started_at": self.confidential_started_at.isoformat(),
             "ended_at": self.confidential_ended_at.isoformat() if self.confidential_ended_at else None,
@@ -1167,6 +1246,68 @@ class TelemostBot:
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def participant_metrics(self) -> dict:
+        """Return the latest participant observation for node APIs and dashboards."""
+        now = datetime.now(timezone.utc)
+        last_valid_age_seconds = None
+        if self.participant_count_last_valid_at is not None:
+            last_valid_age_seconds = max(
+                0,
+                int((now - self.participant_count_last_valid_at).total_seconds()),
+            )
+        if self.meeting_started_at is None:
+            status = "starting"
+        elif self.participant_count_valid:
+            status = "ok"
+        elif self.participant_count_last_valid_at is not None:
+            status = "stale"
+        else:
+            status = "unavailable"
+        return {
+            "status": status,
+            "session_id": self.session_id,
+            "other_participants_count": self.other_participants_count,
+            "includes_bot": False,
+            "valid": self.participant_count_valid,
+            "measured_at": (
+                self.participant_count_measured_at.isoformat()
+                if self.participant_count_measured_at is not None
+                else None
+            ),
+            "last_valid_at": (
+                self.participant_count_last_valid_at.isoformat()
+                if self.participant_count_last_valid_at is not None
+                else None
+            ),
+            "last_valid_age_seconds": last_valid_age_seconds,
+            "poll_interval_seconds": 5,
+            "error": self.participant_count_error,
+            "single_participant": self.single_participant_monitor.snapshot(
+                meeting_active=self.meeting_started_at is not None and self.meeting_ended_at is None
+            ),
+            "audio_activity": self.audio_activity_monitor.snapshot(self.single_participant_monitor.snapshot(
+                meeting_active=self.meeting_started_at is not None and self.meeting_ended_at is None
+            )),
+        }
+
+    def _record_participant_observation(
+        self,
+        *,
+        count: int | None = None,
+        valid: bool,
+        error: str | None = None,
+    ) -> None:
+        measured_at = datetime.now(timezone.utc)
+        with self.audio_activity_monitor.lock:
+            self.single_participant_monitor.observe(count, valid, measured_at)
+            self.audio_activity_monitor.update_participants(self.single_participant_monitor.snapshot())
+        self.participant_count_measured_at = measured_at
+        self.participant_count_valid = valid
+        self.participant_count_error = error
+        if valid and count is not None:
+            self.other_participants_count = count
+            self.participant_count_last_valid_at = measured_at
 
     async def get_participant_count(self) -> int:
         """Возвращает количество других участников на встрече (исключая бота)."""
@@ -1242,6 +1383,8 @@ class TelemostBot:
             previous = self._last_valid_participant_count
 
             if raw_count > max_expected:
+                error = f"participant count above limit: {raw_count} > {max_expected}"
+                self._record_participant_observation(valid=False, error=error)
                 self._print(
                     "[Bot] Ignoring participant count above limit: "
                     f"{raw_count} > {max_expected}; using previous valid count {previous}"
@@ -1249,6 +1392,8 @@ class TelemostBot:
                 return previous
 
             if previous > 0 and raw_count > previous and (raw_count - previous) > spike_delta:
+                error = f"participant count spike: {previous} -> {raw_count}"
+                self._record_participant_observation(valid=False, error=error)
                 self._print(
                     "[Bot] Ignoring participant count spike: "
                     f"{previous} -> {raw_count}; using previous valid count {previous}"
@@ -1256,10 +1401,12 @@ class TelemostBot:
                 return previous
 
             self._last_valid_participant_count = raw_count
+            self._record_participant_observation(count=raw_count, valid=True)
             self._print(f"[Bot] Other participants count: {raw_count}")
             return raw_count
 
         except Exception as e:
+            self._record_participant_observation(valid=False, error=str(e))
             self._print(f"[Bot] Could not get participant count: {e}")
             return self._last_valid_participant_count
 
@@ -1308,6 +1455,8 @@ class TelemostBot:
             return False
 
     async def _try_reconnect(self, meeting_url: str, session_id: str, config: dict, attempt: int) -> bool:
+        self.single_participant_monitor.reset()
+        self.audio_activity_monitor.reset()
         detected_at = datetime.now(timezone.utc)
         max_attempts = int(config.get("max_reconnect_attempts", 3))
         delay_seconds = int(config.get("reconnect_interval_sec", 10))
@@ -1315,6 +1464,8 @@ class TelemostBot:
         deadline = asyncio.get_running_loop().time() + total_limit_seconds
 
         while attempt <= max_attempts and asyncio.get_running_loop().time() <= deadline:
+            if self.dashboard_exit_requested.is_set():
+                return False
             event = {
                 "detected_at": detected_at.isoformat(),
                 "attempt": attempt,
@@ -1329,6 +1480,8 @@ class TelemostBot:
                     await self.page.close()
                 self.page = None
                 await asyncio.sleep(delay_seconds)
+                if self.dashboard_exit_requested.is_set():
+                    return False
                 await self.join(meeting_url, session_id)
                 if await self._is_in_meeting_room():
                     reconnected_at = datetime.now(timezone.utc)
@@ -1350,8 +1503,19 @@ class TelemostBot:
         self._print("[Bot] Reconnect attempts exhausted")
         return False
 
+    def request_dashboard_exit(self) -> dict:
+        already_requested = self.dashboard_exit_requested.is_set()
+        self.exit_reason = "manual_dashboard_exit"
+        self.dashboard_exit_requested.set()
+        if not already_requested:
+            self._print(f"[Bot] Dashboard exit requested session={self.session_id}")
+        return {"status": "already_requested" if already_requested else "accepted",
+                "session_id": self.session_id, "reason": self.exit_reason}
+
     async def leave(self):
         """Закрывает браузер и завершает запись."""
+        self.single_participant_monitor.reset()
+        self.audio_activity_monitor.reset()
         self.stop_voice_command_stream()
         self._finish_meeting_timer()
         self._finish_confidential_recording_timer()
@@ -1393,6 +1557,7 @@ class TelemostBot:
         self.meeting_title = config.get("title")
         self.agenda_text = config.get("agenda")
         self.expected_participants_text = config.get("expected_participants")
+        self.meeting_organizer = config.get("organizer")
         await self.join(meeting_url, session_id)
 
         alone_seconds = 0
@@ -1401,6 +1566,9 @@ class TelemostBot:
         reconnect_enabled = config.get("reconnect_enabled", True)
         max_participants = 0  # начинаем с 0, так как бот считает других участников
         while True:
+            if self.dashboard_exit_requested.is_set():
+                self._print("[Bot] Leaving after dashboard command")
+                break
             if reconnect_enabled:
                 in_meeting = await self._is_in_meeting_room()
                 lost_checks = 0 if in_meeting else lost_checks + 1
@@ -1454,6 +1622,7 @@ class TelemostBot:
 
         # Сохраняем максимальное количество участников в конфиг для транскрипции
         config["max_participants"] = max_participants
+        config["exit_reason"] = self.exit_reason
         await self.leave()
         config["meeting_started_at"] = (
             self.meeting_started_at.isoformat() if self.meeting_started_at else None

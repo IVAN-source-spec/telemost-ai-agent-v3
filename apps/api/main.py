@@ -7,6 +7,7 @@ from apps.api.routers.dashboard import dashboard_router
 from apps.api.routers.healts import health_router
 from apps.api.routers.meetings import meetings_router
 from apps.api.routers.node import node_router
+from apps.api.routers.session_update import session_update_router
 
 
 @asynccontextmanager
@@ -71,6 +72,9 @@ app.include_router(
 )
 app.include_router(
     router=node_router
+)
+app.include_router(
+    router=session_update_router
 )
 
 

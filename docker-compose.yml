@@ -18,10 +18,16 @@ services:
       BOT_NODE_ID: telemost-vm-3-bot-1
       BOT_NODE_NAME: "Третья VM Bot 1"
       VOICE_COMMANDS_SERVICE_URL: ws://192.168.101.68:8020/ws/audio
+      SESSION_UPDATE_ENABLED: "1"
+      SESSION_UPDATE_TARGET_ID: telemost-vm-3-bot-1
+      SESSION_UPDATE_API_TOKEN: ${SESSION_UPDATE_API_TOKEN}
+      SESSION_UPDATE_ENCRYPTION_KEY: ${SESSION_UPDATE_ENCRYPTION_KEY}
+      SESSION_UPDATE_MAX_PLAINTEXT_BYTES: "2097152"
     command:
       - sh
       - -lc
       - >
+        /app/scripts/ensure_audio_sink.sh;
         rm -f /tmp/.X99-lock /tmp/.X11-unix/X99;
         Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp &
         for n in $(seq 1 40); do
@@ -33,7 +39,7 @@ services:
     ports:
       - "8001:8000"
     volumes:
-      - ./data/auth:/app/data/auth:ro
+      - ./data/auth:/app/data/auth
       - ./recordings/bot-1:/app/recordings
       - ./yandex_disk_upload_errors_bot_1.jsonl:/app/yandex_disk_upload_errors.jsonl
       - /run/user/1002/pulse/native:/run/user/1002/pulse/native
@@ -65,6 +71,7 @@ services:
       - sh
       - -lc
       - >
+        /app/scripts/ensure_audio_sink.sh;
         rm -f /tmp/.X99-lock /tmp/.X11-unix/X99;
         Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp &
         for n in $(seq 1 40); do
@@ -108,6 +115,7 @@ services:
       - sh
       - -lc
       - >
+        /app/scripts/ensure_audio_sink.sh;
         rm -f /tmp/.X99-lock /tmp/.X11-unix/X99;
         Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp &
         for n in $(seq 1 40); do

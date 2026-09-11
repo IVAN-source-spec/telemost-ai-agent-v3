@@ -56,6 +56,7 @@ class ChatCommandsModule:
         self._startup_anchor_seen = False
         self._startup_anchor_wait_scans = 0
         self._confidential_mode: str | None = None
+        self._agenda_submission_task: asyncio.Task | None = None
         self._agenda_submission_author: str | None = None
         self._agenda_submission_deadline: float | None = None
         self._agenda_submission_timeout_seconds = int(
@@ -67,6 +68,8 @@ class ChatCommandsModule:
             float(os.getenv("TELEMOST_COMMAND_DEDUP_SECONDS", "5")),
         )
         self._recent_service_message_times: dict[str, float] = {}
+        self._service_message_send_lock = asyncio.Lock()
+        self._startup_message_complete = asyncio.Event()
         self._outgoing_message_dedup_seconds = max(
             0.0,
             float(os.getenv("TELEMOST_OUTGOING_MESSAGE_DEDUP_SECONDS", "20")),
@@ -83,6 +86,9 @@ class ChatCommandsModule:
         await self._send_startup_message()
         self._start_message_monitor()
         return self._messages_path()
+
+    async def wait_for_startup_message(self) -> None:
+        await self._startup_message_complete.wait()
 
 
     async def handle_command_text(
@@ -201,42 +207,41 @@ class ChatCommandsModule:
     async def _send_startup_message(self) -> None:
         message = self._startup_message_text()
         self._startup_anchor_text = self._normalize_message_text(message)
-        if not message:
-            self._startup_anchor_seen = True
-            return
-
         try:
+            if not message:
+                self._startup_anchor_seen = True
+                return
             before_count = await self._message_text_occurrence_count(message)
-            last_result = "not attempted"
-            for attempt in range(1, 4):
-                send_result = await self._send_service_message(
-                    message,
-                    deduplicate=False,
-                    suppress_unverified_retry=False,
-                )
-                last_result = send_result
-                await self.page.wait_for_timeout(1200)
-                after_count = await self._message_text_occurrence_count(message)
-                self.logger(
-                    f"[Bot] Chat startup message result: {send_result}; "
-                    f"visible matches {before_count}->{after_count}; attempt {attempt}/3"
-                )
-                if after_count > before_count or await self._latest_visible_message_matches(message):
-                    self._startup_anchor_sent = True
-                    return
-                await self.page.wait_for_timeout(1500)
+            send_result = await self._send_service_message(
+                message,
+                deduplicate=True,
+                suppress_unverified_retry=True,
+            )
+            await self.page.wait_for_timeout(1200)
+            after_count = await self._message_text_occurrence_count(message)
+            visible = after_count > before_count or await self._latest_visible_message_matches(message)
+            may_have_succeeded = self._service_message_send_may_have_succeeded(send_result)
+            self.logger(
+                f"[Bot] Chat startup message result: {send_result}; "
+                f"visible matches {before_count}->{after_count}; single send pipeline"
+            )
+            if visible or may_have_succeeded:
+                self._startup_anchor_sent = True
+                return
             self._startup_anchor_sent = False
             await self._capture_existing_messages_baseline()
             self._startup_anchor_seen = False
             self.logger(
                 f"[Bot] Chat command session anchor is waiting because startup message was not visible; "
-                f"last result: {last_result}"
+                f"last result: {send_result}"
             )
         except Exception as error:
             self.logger(f"[Bot] Chat startup message failed: {error}")
             await self._capture_existing_messages_baseline()
             self._startup_anchor_seen = False
             self.logger("[Bot] Chat command session anchor is waiting after startup message failure")
+        finally:
+            self._startup_message_complete.set()
 
     async def _message_text_occurrence_count(self, message: str) -> int:
         expected = self._normalize_message_text(message)
@@ -305,7 +310,13 @@ class ChatCommandsModule:
         for command in extra_commands:
             if command not in message:
                 message = (message + "\n" + command).strip()
-        if not self.agenda_enabled and self.ADD_AGENDA_COMMAND not in message:
+        if self.agenda_enabled:
+            message = "\n".join(
+                line
+                for line in message.splitlines()
+                if self._normalize_message_text(line).casefold() != self.ADD_AGENDA_COMMAND.casefold()
+            ).strip()
+        elif self.ADD_AGENDA_COMMAND not in message:
             message = (message + "\n" + self.ADD_AGENDA_COMMAND).strip()
         return message
 
@@ -398,6 +409,20 @@ class ChatCommandsModule:
         deduplicate: bool = True,
         suppress_unverified_retry: bool = True,
     ) -> str:
+        async with self._service_message_send_lock:
+            return await self._send_service_message_unlocked(
+                message,
+                deduplicate=deduplicate,
+                suppress_unverified_retry=suppress_unverified_retry,
+            )
+
+    async def _send_service_message_unlocked(
+        self,
+        message: str,
+        *,
+        deduplicate: bool = True,
+        suppress_unverified_retry: bool = True,
+    ) -> str:
         normalized = self._normalize_message_text(message)
         if deduplicate and self._is_duplicate_service_message(normalized):
             return "duplicate outgoing service message suppressed"
@@ -407,12 +432,12 @@ class ChatCommandsModule:
         for attempt in range(1, 4):
             result = await self._send_message_to_chat(message)
             last_result = result
-            if deduplicate and self._service_message_send_may_have_succeeded(result):
-                self._mark_service_message_attempt(normalized)
-                self._bot_sent_texts.add(normalized)
             await self.page.wait_for_timeout(1200)
             after_count = await self._message_text_occurrence_count(message)
             if after_count > before_count or await self._latest_visible_message_matches(message):
+                if deduplicate:
+                    self._mark_service_message_attempt(normalized)
+                    self._bot_sent_texts.add(normalized)
                 return result if attempt == 1 else f"{result}; verified on attempt {attempt}"
             self.logger(
                 f"[Bot] Service message was not visible after attempt {attempt}/3: "
@@ -824,13 +849,15 @@ class ChatCommandsModule:
 
             is_chat_source = not bool(external_source)
             add_agenda_command, agenda_payload = self._parse_add_agenda_command(text)
-            if is_chat_source and add_agenda_command:
+            if (is_chat_source or external_source == "voice") and add_agenda_command:
                 self._handled_command_keys.add(key)
                 if self.agenda_enabled:
                     result = await self._send_service_message(
                         "Повестка уже добавлена, повторная команда не выполнена."
                     )
                     self.logger(f"[Bot] Duplicate add agenda response result: {result}")
+                elif self._agenda_submission_task is not None and not self._agenda_submission_task.done():
+                    await self._send_service_message("Повестка уже обрабатывается. Дождитесь результата.")
                 elif agenda_payload:
                     await self._submit_agenda_from_chat(
                         agenda_payload,
@@ -862,7 +889,14 @@ class ChatCommandsModule:
             if self._is_exit_bot_command(text):
                 self._handled_command_keys.add(key)
                 response = self._exit_bot_response()
-                result = await self._send_service_message(response)
+                # The bot is about to close the meeting page, so an ambiguous send
+                # must be retried instead of being suppressed as a possible duplicate.
+                # _send_service_message completes after a verified send or after all
+                # three attempts, and only then do we raise the exit request below.
+                result = await self._send_service_message(
+                    response,
+                    suppress_unverified_retry=False,
+                )
                 self.logger(f"[Bot] Exit command response result: {result}")
                 await self._notify_confidential_event("exit_requested", "", "exit")
                 continue
@@ -1270,15 +1304,13 @@ class ChatCommandsModule:
 
 
     def _parse_add_agenda_command(self, text: str) -> tuple[bool, str | None]:
-        normalized = self._normalize_message_text(text)
-        lowered = normalized.lower()
-        if lowered == self.ADD_AGENDA_COMMAND:
-            return True, None
-        prefix = self.ADD_AGENDA_COMMAND + " "
-        if lowered.startswith(prefix):
-            payload = normalized[len(self.ADD_AGENDA_COMMAND):].strip()
-            return True, payload or None
-        return False, None
+        match = re.match(
+            re.escape(self.ADD_AGENDA_COMMAND) + r"(?=$|[\s:])\s*:?\s*(.*)$",
+            text.strip(), re.IGNORECASE | re.DOTALL,
+        )
+        if match is None:
+            return False, None
+        return True, match.group(1).strip() or None
 
     @staticmethod
     def _agenda_message_author(message: dict) -> str:
@@ -1310,7 +1342,8 @@ class ChatCommandsModule:
     @staticmethod
     def _agenda_submission_prompt() -> str:
         return (
-            "Отправьте повестку следующим сообщением в формате:\n"
+            "Отправьте повестку следующим сообщением в произвольном виде или в формате:\n"
+            "Чтобы передать её голосом, скажите «Начало повестки», продиктуйте текст, затем скажите «Конец повестки».\n"
             "###Повестка:\n"
             "#1. Первый вопрос - 00:10:00 | Материалы: https://example.com\n"
             "#2. Второй вопрос | Материалы: документ и ссылка\n"
@@ -1333,7 +1366,37 @@ class ChatCommandsModule:
             "Время и материалы необязательны; материалы отделяются символом |."
         )
 
-    async def _submit_agenda_from_chat(
+    async def _submit_agenda_from_chat(self, raw_agenda: str, message: dict, keep_waiting: bool) -> None:
+        if self._agenda_submission_task is not None and not self._agenda_submission_task.done():
+            await self._send_service_message("Повестка уже обрабатывается. Дождитесь результата.")
+            return
+        async def process():
+            try:
+                if self.page.is_closed():
+                    return
+                await self._process_agenda_from_chat(raw_agenda, message, keep_waiting)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Do not expose input text, provider responses or credentials in the chat.
+                if not self.agenda_enabled and not self.page.is_closed():
+                    if keep_waiting:
+                        self._start_agenda_submission_wait(message)
+                    await self._send_service_message("ИИ временно недоступен. Попробуйте отправить повестку позже.")
+            finally:
+                # Permit an immediate retry of the same one-command submission.
+                self._recent_command_times.pop(self._normalize_message_text(
+                    str(message.get("text") or "")).casefold(), None)
+        self._agenda_submission_task = asyncio.create_task(process())
+
+    async def _announce_agenda_ai_processing(self) -> None:
+        if self.agenda_enabled or self.page.is_closed():
+            return
+        text = "Повестка отправлена в ИИ для обработки. Подождите немного."
+        self._recent_service_message_times.pop(self._service_message_dedup_key(text), None)
+        await self._send_service_message(text)
+
+    async def _process_agenda_from_chat(
         self,
         raw_agenda: str,
         message: dict,
@@ -1344,8 +1407,14 @@ class ChatCommandsModule:
             raw_agenda=raw_agenda,
             source="chat",
             author=str(message.get("author") or ""),
+            on_ai_processing=self._announce_agenda_ai_processing,
         )
         status = (agenda_result or {}).get("status")
+        if status == "meeting_ended" or self.page.is_closed():
+            return
+        if status != "agenda_activated" and self.agenda_enabled:
+            # Another source announced its agenda while this request was in flight.
+            return
         if status == "agenda_activated":
             self.agenda_enabled = True
             self._clear_agenda_submission_wait()
@@ -1367,7 +1436,14 @@ class ChatCommandsModule:
             self._start_agenda_submission_wait(message)
         else:
             self._clear_agenda_submission_wait()
-        response = self._invalid_agenda_response((agenda_result or {}).get("error"))
+        messages = {
+            "agenda_not_found": "Повестка не найдена в переданном тексте. Уточните её и отправьте повторно.",
+            "ai_unavailable": "ИИ временно недоступен. Попробуйте отправить повестку позже.",
+            "invalid_ai_result": "Не удалось корректно обработать повестку. Уточните текст и отправьте повторно.",
+            "processing": "Повестка уже обрабатывается. Дождитесь результата.",
+        }
+        response = messages.get(status, "Не удалось добавить повестку. Попробуйте отправить её повторно.")
+        self._recent_service_message_times.pop(self._service_message_dedup_key(response), None)
         result = await self._send_service_message(response)
         self.logger(f"[Bot] Invalid agenda response result: {result}")
 
