@@ -488,12 +488,25 @@ class ChatCommandsModule:
     async def _send_message_to_chat(self, message: str) -> str:
         chat_frame = await self._wait_for_chat_frame(timeout_ms=10000)
         if chat_frame is None:
-            return "chat iframe not found"
+            recovery_result = await self._recover_chat_panel(chat_was_visible=False)
+            self.logger(f"[Bot] Chat panel recovery result: {recovery_result}")
+            chat_frame = await self._wait_for_chat_frame(timeout_ms=10000)
+            if chat_frame is None:
+                return "chat iframe not found after panel recovery"
 
-        editor = await self._wait_for_message_editor(chat_frame)
+        editor = await self._wait_for_message_editor(chat_frame, timeout_ms=3000)
         if editor is None:
-            await self._write_chat_send_debug(chat_frame, "message editor not found")
-            return "message editor not found"
+            chat_was_visible = await self._chat_panel_is_visible()
+            await self._write_chat_send_debug(chat_frame, "message editor not found before panel recovery")
+            recovery_result = await self._recover_chat_panel(chat_was_visible=chat_was_visible)
+            self.logger(f"[Bot] Chat panel recovery result: {recovery_result}")
+            chat_frame = await self._wait_for_chat_frame(timeout_ms=10000)
+            if chat_frame is None:
+                return "chat iframe not found after editor recovery"
+            editor = await self._wait_for_message_editor(chat_frame, timeout_ms=10000)
+            if editor is None:
+                await self._write_chat_send_debug(chat_frame, "message editor not found after panel recovery")
+                return "message editor not found after panel recovery"
 
         await editor.click(timeout=5000)
         try:
@@ -536,8 +549,9 @@ class ChatCommandsModule:
             return False
         return current_text != self._normalize_message_text(message)
 
-    async def _wait_for_message_editor(self, chat_frame):
-        timeout_ms = int(os.getenv("TELEMOST_CHAT_COMMANDS_EDITOR_TIMEOUT_MS", "60000"))
+    async def _wait_for_message_editor(self, chat_frame, timeout_ms: int | None = None):
+        if timeout_ms is None:
+            timeout_ms = int(os.getenv("TELEMOST_CHAT_COMMANDS_EDITOR_TIMEOUT_MS", "60000"))
         deadline = datetime.now(timezone.utc).timestamp() + timeout_ms / 1000
         while datetime.now(timezone.utc).timestamp() < deadline:
             editor = await self._find_message_editor(chat_frame)
@@ -549,9 +563,11 @@ class ChatCommandsModule:
     async def _find_message_editor(self, chat_frame):
         selectors = [
             'textarea',
-            '[contenteditable="true"]',
+            '[contenteditable]:not([contenteditable="false"])',
             '[role="textbox"]',
             'input[type="text"]',
+            '.yamb-compose-textarea',
+            '[class*="compose"] [contenteditable]',
         ]
         for selector in selectors:
             locator = chat_frame.locator(selector)
@@ -565,6 +581,25 @@ class ChatCommandsModule:
                     continue
 
         return None
+
+    async def _chat_panel_is_visible(self) -> bool:
+        frames = self.page.locator('iframe[src*="yandex.ru/chat"]')
+        for index in range(await frames.count() - 1, -1, -1):
+            try:
+                if await frames.nth(index).is_visible(timeout=1000):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _recover_chat_panel(self, *, chat_was_visible: bool) -> str:
+        actions = []
+        if chat_was_visible:
+            actions.append(await self._click_chat_button())
+            await self.page.wait_for_timeout(500)
+        actions.append(await self._click_chat_button())
+        await self.page.wait_for_timeout(1200)
+        return "; ".join(actions)
 
     async def _click_send_button_in_frame(self, chat_frame) -> str:
         result = await chat_frame.evaluate("""() => {
@@ -2307,7 +2342,7 @@ class ChatCommandsModule:
         )
 
     def _find_chat_frame(self):
-        for frame in self.page.frames:
+        for frame in reversed(self.page.frames):
             if "yandex.ru/chat" in frame.url:
                 return frame
         return None
