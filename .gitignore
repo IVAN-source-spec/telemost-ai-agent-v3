@@ -85,3 +85,10 @@ node_dashboard.log
 uvicorn*.log
 nohup.out
 yandex_disk_upload_errors_bot_*.jsonl
+
+# Production-local artifacts
+.codex-backup*/
+.codex-backups/
+.telemost-browser-profile/
+data/auth/*.json
+*.backup-*

@@ -22,6 +22,25 @@ def _agenda_status_for_node_bot(bot: dict) -> dict:
     }
 
 
+def _participant_status_for_node_bot(bot: dict) -> dict:
+    bot_id = bot.get("bot_id")
+    record = get_active_bot(bot_id) if bot_id else None
+    if record is not None:
+        return record.bot.participant_metrics()
+    return {
+        "status": "idle" if bot.get("status") == "idle" else "unavailable",
+        "session_id": bot.get("session_id"),
+        "other_participants_count": None,
+        "includes_bot": False,
+        "valid": False,
+        "measured_at": None,
+        "last_valid_at": None,
+        "last_valid_age_seconds": None,
+        "poll_interval_seconds": 5,
+        "error": None,
+    }
+
+
 @node_router.get("/status")
 async def get_node_status(
     _auth=Depends(require_node_api_token),
@@ -43,6 +62,7 @@ async def get_node_status(
                 "node_name": node_name,
                 "global_bot_id": get_global_bot_id(bot_id) if bot_id else None,
                 "agenda_status": _agenda_status_for_node_bot(bot),
+                "participant_metrics": _participant_status_for_node_bot(bot),
             }
         )
 
