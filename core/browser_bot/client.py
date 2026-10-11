@@ -195,110 +195,294 @@ class TelemostBot:
             except Exception as e3:
                 self._print(f"[Bot] All methods failed: {e3}")
 
-    async def _click_continue_button(self, meeting_url: str) -> None:
-        try:
-            result = await self.page.evaluate('''() => {
-                const buttons = document.querySelectorAll('button');
-                for (let btn of buttons) {
-                    const text = btn.innerText.trim();
-                    const dataTestId = btn.getAttribute('data-testid') || '';
-                    if (text.includes('Продолжить') || dataTestId === 'orb-button') {
-                        btn.click();
-                        return 'clicked via JS: ' + (text || dataTestId);
-                    }
-                }
-                return 'not found';
-            }''')
-            self._print(f"[Bot] 'Продолжить в браузере' result: {result}")
-            if result == "not found":
-                raise RuntimeError("Continue button not found via JS")
-            await self.page.wait_for_selector('button:has-text("Подключиться")', timeout=10000)
-            return
-        except Exception as e1:
-            self._print(f"[Bot] JS method failed: {e1}")
-
-        try:
-            await self.page.click(
-                'xpath=//button[contains(text(), "Продолжить в браузере")]',
-                timeout=5000,
+    async def _save_after_continue_screenshot(self) -> None:
+        screenshot_path = Path(
+            os.getenv(
+                "TELEMOST_AFTER_CONTINUE_SCREENSHOT_PATH",
+                "/app/recordings/debug/after_continue.png",
             )
-            self._print("[Bot] Clicked 'Продолжить в браузере' via XPath")
-            await self.page.wait_for_selector('button:has-text("Подключиться")', timeout=10000)
-        except Exception as e2:
-            self._print(f"[Bot] All methods failed: {e2}")
+        )
+        try:
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            await self.page.screenshot(path=str(screenshot_path), full_page=True)
+            self._print(f"[Bot] Saved after-continue screenshot: {screenshot_path}")
+        except Exception as error:
+            self._print(f"[Bot] Could not save after-continue screenshot: {error}")
+
+    async def _save_reconnect_debug_screenshot(self, attempt: int) -> None:
+        screenshot_path = Path(
+            os.getenv(
+                "TELEMOST_RECONNECT_SCREENSHOT_PATH",
+                "/project-output/reconnect_attempt.png",
+            )
+        )
+        try:
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            await self.page.screenshot(path=str(screenshot_path), full_page=True)
+            self._print(
+                "[Bot] Saved reconnect debug screenshot "
+                f"for attempt {attempt}: {screenshot_path}"
+            )
+        except Exception as error:
+            self._print(
+                "[Bot] Could not save reconnect debug screenshot "
+                f"for attempt {attempt}: {error}"
+            )
+
+    async def _save_continue_failure_screenshot(self) -> None:
+        screenshot_path = Path(
+            os.getenv(
+                "TELEMOST_CONTINUE_FAILURE_SCREENSHOT_PATH",
+                "/project-output/continue_button_failure.png",
+            )
+        )
+        try:
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            await self.page.screenshot(path=str(screenshot_path), full_page=True)
+            self._print(
+                f"[Bot] Saved continue-button failure screenshot: {screenshot_path}"
+            )
+        except Exception as error:
+            self._print(
+                "[Bot] Could not save continue-button failure screenshot: "
+                f"{error}"
+            )
+
+    async def _click_continue_button(self, meeting_url: str) -> None:
+        deadline = asyncio.get_running_loop().time() + 30
+        last_result = "not found"
+
+        while asyncio.get_running_loop().time() < deadline:
+            for frame in self.page.frames:
+                try:
+                    result = await frame.evaluate('''() => {
+                        const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                        const visible = (node) => {
+                            const style = window.getComputedStyle(node);
+                            const rect = node.getBoundingClientRect();
+                            return style.visibility !== 'hidden' &&
+                                style.display !== 'none' &&
+                                Number(style.opacity || '1') !== 0 &&
+                                rect.width > 0 && rect.height > 0;
+                        };
+                        const candidates = Array.from(document.querySelectorAll(
+                            'button, a, [role="button"], [data-testid]'
+                        ));
+                        for (const node of candidates) {
+                            const text = clean(node.innerText || node.textContent);
+                            const dataTestId = node.getAttribute('data-testid') || '';
+                            const matches =
+                                text === 'Продолжить в браузере' ||
+                                text.startsWith('Продолжить в браузере') ||
+                                (dataTestId === 'orb-button' && text.includes('Продолжить'));
+                            if (matches && visible(node)) {
+                                node.scrollIntoView({ block: 'center', inline: 'center' });
+                                node.click();
+                                return `clicked ${node.tagName.toLowerCase()}: ${text || dataTestId}`;
+                            }
+                        }
+                        return 'not found';
+                    }''')
+                    last_result = result
+                    if result != "not found":
+                        self._print(f"[Bot] 'Продолжить в браузере' result: {result}")
+                        prejoin_ready = False
+                        transition_deadline = asyncio.get_running_loop().time() + 15
+                        while asyncio.get_running_loop().time() < transition_deadline:
+                            for transition_frame in self.page.frames:
+                                try:
+                                    prejoin_ready = bool(await transition_frame.evaluate('''() => {
+                                        const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                                        const visible = (node) => {
+                                            const style = window.getComputedStyle(node);
+                                            const rect = node.getBoundingClientRect();
+                                            return style.visibility !== 'hidden' &&
+                                                style.display !== 'none' &&
+                                                rect.width > 0 && rect.height > 0;
+                                        };
+                                        return Array.from(document.querySelectorAll(
+                                            'button, a, [role="button"], [data-testid]'
+                                        )).some((node) =>
+                                            visible(node) && clean(node.innerText || node.textContent) === 'Подключиться'
+                                        );
+                                    }'''))
+                                except Exception:
+                                    continue
+                                if prejoin_ready:
+                                    break
+                            if prejoin_ready:
+                                break
+                            await self.page.wait_for_timeout(500)
+                        self._print(f"[Bot] Pre-join screen detected after continue: {prejoin_ready}")
+                        await self._save_after_continue_screenshot()
+                        return
+                except Exception as error:
+                    last_result = str(error)
+            await self.page.wait_for_timeout(500)
+
+        raise RuntimeError(
+            "Visible 'Продолжить в браузере' control was not found or clicked "
+            f"within 30 seconds: {last_result}"
+        )
 
     async def _click_ai_projects_join_button(self) -> str:
-        for _ in range(60):
-            result = await self.page.evaluate(
-                """() => {
-                    const candidates = Array.from(document.querySelectorAll('button'));
-                    const isVisible = (node) => {
-                        const style = window.getComputedStyle(node);
-                        const rect = node.getBoundingClientRect();
-                        return style.visibility !== 'hidden' &&
-                            style.display !== 'none' &&
-                            rect.width > 0 &&
-                            rect.height > 0;
-                    };
-                    for (const button of candidates) {
-                        const text = (button.innerText || button.textContent || '').trim();
-                        const dataTestId = button.getAttribute('data-testid') || '';
-                        const className = String(button.className || '');
-                        const type = button.getAttribute('type') || '';
-                        const looksLikeJoin =
-                            dataTestId.includes('join') ||
-                            text.includes('Войти') ||
-                            text.includes('Присоединиться') ||
-                            text.includes('Подключиться') ||
-                            text.includes('Join') ||
-                            className.includes('joinButton') ||
-                            className.includes('JoinButton') ||
-                            type === 'submit';
-                        if (looksLikeJoin && isVisible(button) && !button.disabled) {
-                            button.scrollIntoView({ block: 'center', inline: 'center' });
-                            button.click();
-                            return `clicked: ${text || dataTestId || type || className}`;
-                        }
-                    }
-                    return 'not ready';
-                }"""
-            )
-            if result != "not ready":
-                return result
-            await self.page.wait_for_timeout(1000)
-        return "join button not found"
+        deadline = asyncio.get_running_loop().time() + 30
+        last_result = "not found"
 
-    async def _mute_microphone_js(self):
+        while asyncio.get_running_loop().time() < deadline:
+            for frame in self.page.frames:
+                try:
+                    result = await frame.evaluate(
+                        """() => {
+                            const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                            const visible = (node) => {
+                                const style = window.getComputedStyle(node);
+                                const rect = node.getBoundingClientRect();
+                                return style.visibility !== 'hidden' &&
+                                    style.display !== 'none' &&
+                                    Number(style.opacity || '1') !== 0 &&
+                                    rect.width > 0 && rect.height > 0;
+                            };
+                            const candidates = Array.from(document.querySelectorAll(
+                                'button, a, [role="button"], [data-testid]'
+                            ));
+                            for (const node of candidates) {
+                                const text = clean(node.innerText || node.textContent);
+                                const aria = clean(node.getAttribute('aria-label'));
+                                const dataTestId = clean(node.getAttribute('data-testid'));
+                                const description = `${text} ${aria} ${dataTestId}`.toLowerCase();
+                                const exactText =
+                                    text === 'Подключиться' ||
+                                    text === 'Присоединиться' ||
+                                    text === 'Join';
+                                const explicitJoinControl =
+                                    dataTestId.toLowerCase().includes('join-button') ||
+                                    dataTestId.toLowerCase() === 'join';
+                                if ((exactText || explicitJoinControl) && visible(node) && !node.disabled) {
+                                    node.scrollIntoView({ block: 'center', inline: 'center' });
+                                    node.click();
+                                    return `clicked ${node.tagName.toLowerCase()}: ${text || aria || dataTestId}`;
+                                }
+                            }
+                            return 'not found';
+                        }"""
+                    )
+                except Exception as error:
+                    last_result = str(error)
+                    continue
+                last_result = result
+                if result != "not found":
+                    return result
+            await self.page.wait_for_timeout(500)
+
+        raise RuntimeError(
+            f"Visible 'Подключиться' control was not found or clicked within 30 seconds: {last_result}"
+        )
+
+    async def _save_after_join_screenshot(self) -> None:
+        screenshot_path = Path(
+            os.getenv(
+                "TELEMOST_AFTER_JOIN_SCREENSHOT_PATH",
+                "/project-output/after_join_clicked.png",
+            )
+        )
         try:
-            result = await self.page.evaluate('''() => {
-                const selectors = [
-                    '[data-testid="mute-audio"]',
-                    '[data-testid="turn-off-mic-button"]',
-                    'button[aria-label*="микрофон"]',
-                    'button[aria-label*="Microphone"]'
-                ];
-                for (let sel of selectors) {
-                    const btn = document.querySelector(sel);
-                    if (btn) {
-                        btn.click();
-                        return 'clicked: ' + sel;
-                    }
-                }
-                const buttons = document.querySelectorAll('button');
-                for (let btn of buttons) {
-                    const aria = btn.getAttribute('aria-label') || '';
-                    const dataTestId = btn.getAttribute('data-testid') || '';
-                    if (aria.includes('микрофон') || aria.includes('Microphone') || 
-                        dataTestId.includes('mic') || dataTestId.includes('mute') || dataTestId.includes('audio')) {
-                        btn.click();
-                        return 'clicked fallback: ' + (aria || dataTestId);
-                    }
-                }
-                return 'not found';
-            }''')
-            self._print(f"[Bot] Microphone toggle result: {result}")
-        except Exception as e:
-            self._print(f"[Bot] Mute error: {e}")
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            await self.page.screenshot(path=str(screenshot_path), full_page=True)
+            self._print(f"[Bot] Saved after-join screenshot: {screenshot_path}")
+        except Exception as error:
+            self._print(f"[Bot] Could not save after-join screenshot: {error}")
+
+    async def _save_after_microphone_screenshot(self) -> None:
+        screenshot_path = Path(
+            os.getenv(
+                "TELEMOST_AFTER_MICROPHONE_SCREENSHOT_PATH",
+                "/project-output/after_microphone_muted.png",
+            )
+        )
+        try:
+            screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+            await self.page.screenshot(path=str(screenshot_path), full_page=True)
+            self._print(f"[Bot] Saved after-microphone screenshot: {screenshot_path}")
+        except Exception as error:
+            self._print(f"[Bot] Could not save after-microphone screenshot: {error}")
+
+    async def _mute_microphone_js(self) -> str:
+        deadline = asyncio.get_running_loop().time() + 15
+        last_result = "microphone control not found"
+
+        while asyncio.get_running_loop().time() < deadline:
+            for frame in self.page.frames:
+                try:
+                    result = await frame.evaluate('''() => {
+                        const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                        const visible = (node) => {
+                            const style = window.getComputedStyle(node);
+                            const rect = node.getBoundingClientRect();
+                            return style.visibility !== 'hidden' &&
+                                style.display !== 'none' &&
+                                Number(style.opacity || '1') !== 0 &&
+                                rect.width > 0 && rect.height > 0;
+                        };
+                        const candidates = Array.from(document.querySelectorAll(
+                            'button, [role="button"], [data-testid]'
+                        ));
+                        for (const node of candidates) {
+                            if (!visible(node) || node.disabled) continue;
+                            const aria = clean(node.getAttribute('aria-label'));
+                            const title = clean(node.getAttribute('title'));
+                            const testId = clean(node.getAttribute('data-testid'));
+                            const text = clean(node.innerText || node.textContent);
+                            const description = `${aria} ${title} ${testId} ${text}`.toLowerCase();
+                            const isMicrophone =
+                                description.includes('микрофон') ||
+                                description.includes('microphone') ||
+                                testId.toLowerCase().includes('mic') ||
+                                testId.toLowerCase().includes('mute-audio');
+                            if (!isMicrophone || description.includes('camera') || description.includes('камера')) {
+                                continue;
+                            }
+
+                            const alreadyMuted =
+                                description.includes('включить микрофон') ||
+                                description.includes('микрофон выключен') ||
+                                description.includes('turn on microphone') ||
+                                description.includes('microphone off') ||
+                                description.includes('unmute');
+                            if (alreadyMuted) {
+                                return `muted: ${aria || title || testId || text}`;
+                            }
+
+                            const shouldMute =
+                                description.includes('выключить микрофон') ||
+                                description.includes('turn off microphone') ||
+                                description.includes('mute microphone') ||
+                                testId.toLowerCase().includes('mute-audio') ||
+                                testId.toLowerCase().includes('turn-off-mic');
+                            if (shouldMute) {
+                                node.scrollIntoView({ block: 'center', inline: 'center' });
+                                node.click();
+                                return `clicked: ${aria || title || testId || text}`;
+                            }
+                            return `unknown state: ${aria || title || testId || text}`;
+                        }
+                        return 'not found';
+                    }''')
+                except Exception as error:
+                    last_result = str(error)
+                    continue
+
+                last_result = result
+                if result.startswith("muted:"):
+                    self._print(f"[Bot] Microphone is muted: {result}")
+                    return result
+                if result.startswith("clicked:"):
+                    self._print(f"[Bot] Microphone mute clicked: {result}")
+                    await self.page.wait_for_timeout(700)
+                    continue
+            await self.page.wait_for_timeout(500)
+
+        raise RuntimeError(f"Could not confirm muted microphone within 15 seconds: {last_result}")
 
     async def join(self, meeting_url: str, session_id: str = None):
         self.session_id = session_id
@@ -374,18 +558,27 @@ class TelemostBot:
             pass
 
         await self.page.wait_for_timeout(3000)
-        await self._click_continue_button(meeting_url)
+        try:
+            await self._click_continue_button(meeting_url)
+        except Exception:
+            await self._save_continue_failure_screenshot()
+            raise
 
         if not self.join_as_guest:
             self._print("[Bot] Joining as authenticated user")
         else:
             await self._enter_guest_name()
 
+        await self._mute_microphone_js()
+        await self._save_after_microphone_screenshot()
+
         # === НАЖИМАЕМ "ПОДКЛЮЧИТЬСЯ" (радикальное решение) ===
         try:
             result = await self._click_ai_projects_join_button()
             self._print(f"[Bot] JS click result: {result}")
-            await self.page.wait_for_timeout(5000)
+            await self.page.wait_for_timeout(3000)
+            await self._save_after_join_screenshot()
+            await self.page.wait_for_timeout(2000)
 
             # Ждём изменения URL (признак входа)
             try:
@@ -736,19 +929,29 @@ class TelemostBot:
         if self.agenda_tracker is not None:
             payload.update(self.agenda_tracker.overlay_state())
 
-        try:
-            has_compositor = await self.page.evaluate("typeof window.__COMPOSITOR__ !== 'undefined'")
-            if not has_compositor:
-                script = COMPOSITOR_SCRIPT_PATH.read_text(encoding="utf-8")
-                await self.page.evaluate(script)
-                self._print("[Bot] Timer camera compositor reinjected")
-            await self.page.evaluate(
-                "(data) => window.__COMPOSITOR__ && window.__COMPOSITOR__.updateScene(data)",
-                payload,
-            )
-            self._print("[Bot] Timer camera state updated")
-        except Exception as e:
-            self._print(f"[Bot] Timer camera update failed: {e}")
+        script = None
+        updated_frames = 0
+        frame_errors = []
+        for frame in self.page.frames:
+            try:
+                has_compositor = await frame.evaluate("typeof window.__COMPOSITOR__ !== 'undefined'")
+                if not has_compositor:
+                    if script is None:
+                        script = COMPOSITOR_SCRIPT_PATH.read_text(encoding="utf-8")
+                    await frame.evaluate(script)
+                await frame.evaluate(
+                    "(data) => window.__COMPOSITOR__ && window.__COMPOSITOR__.updateScene(data)",
+                    payload,
+                )
+                updated_frames += 1
+            except Exception as error:
+                frame_errors.append(f"{frame.url}: {error}")
+
+        if updated_frames:
+            self._print(f"[Bot] Timer camera state updated in {updated_frames} frame(s)")
+        else:
+            details = " | ".join(frame_errors[-3:])
+            self._print(f"[Bot] Timer camera update failed in every frame: {details}")
 
     @staticmethod
     def _format_duration(total_seconds: int) -> str:
@@ -1312,72 +1515,79 @@ class TelemostBot:
     async def get_participant_count(self) -> int:
         """Возвращает количество других участников на встрече (исключая бота)."""
         try:
-            result = await self.page.evaluate('''() => {
-                // === 1. Ищем число участников в интерфейсе ===
-                const patterns = [
-                    /^\u0423\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u0438\s*[:.]?\s*(\d+)$/i,
-                    /^\u0423\u0447\u0430\u0441\u0442\u043d\u0438\u043a\s*[:.]?\s*(\d+)$/i,
-                    /^Participants\s*[:.]?\s*(\d+)$/i,
-                    /^Participant\s*[:.]?\s*(\d+)$/i,
-                ];
-                const isVisible = (element) => {
-                    const rect = element.getBoundingClientRect();
-                    const style = window.getComputedStyle(element);
-                    return rect.width > 0 && rect.height > 0 &&
-                        style.display !== 'none' &&
-                        style.visibility !== 'hidden' &&
-                        Number(style.opacity || '1') !== 0;
-                };
-                const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
-
-                let interfaceCount = null;
-                const countElements = Array.from(document.querySelectorAll('button, [role="button"], [aria-label], [title], [data-testid]'))
-                    .filter(isVisible)
-                    .map((el) => clean(`${el.innerText || el.textContent || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`))
-                    .filter((text) => text.length > 0 && text.length <= 40);
-
-                for (const text of countElements) {
-                    for (const pattern of patterns) {
-                        const match = text.match(pattern);
-                        if (match) {
-                            interfaceCount = parseInt(match[1], 10);
-                            break;
+            frame_results = []
+            for frame in self.page.frames:
+                try:
+                    result = await frame.evaluate('''() => {
+                        const isVisible = (element) => {
+                            const rect = element.getBoundingClientRect();
+                            const style = window.getComputedStyle(element);
+                            return rect.width > 0 && rect.height > 0 &&
+                                style.display !== 'none' &&
+                                style.visibility !== 'hidden' &&
+                                Number(style.opacity || '1') !== 0;
+                        };
+                        const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                        const patterns = [
+                            /(?:^|\\s)(\\d+)\\s*(?:\\u0443\\u0447\\u0430\\u0441\\u0442\\u043d\\u0438\\u043a|\\u0443\\u0447\\u0430\\u0441\\u0442\\u043d\\u0438\\u043a\\u0430|\\u0443\\u0447\\u0430\\u0441\\u0442\\u043d\\u0438\\u043a\\u043e\\u0432)(?:\\s|$|[\\u00b7.:])/i,
+                            /(?:participant|participants)\\s*[:.]?\\s*(\\d+)/i,
+                            /(\\d+)\\s*(?:participant|participants)(?:\\s|$|[\\u00b7.:])/i,
+                        ];
+                        const elements = Array.from(document.querySelectorAll(
+                            'button, [role="button"], [aria-label], [title], [data-testid], span, div'
+                        )).filter(isVisible);
+                        for (const element of elements) {
+                            const text = clean(
+                                `${element.innerText || element.textContent || ''} ` +
+                                `${element.getAttribute('aria-label') || ''} ` +
+                                `${element.getAttribute('title') || ''}`
+                            );
+                            if (!text || text.length > 80) continue;
+                            for (const pattern of patterns) {
+                                const match = text.match(pattern);
+                                if (match) {
+                                    const total = parseInt(match[1], 10);
+                                    return {
+                                        count: Math.max(0, total - 1),
+                                        source: 'interface',
+                                        evidence: text,
+                                    };
+                                }
+                            }
                         }
-                    }
-                    if (interfaceCount !== null) break;
-                }
 
-                // === 2. Проверяем, вошёл ли бот (есть ли его видео) ===
-                const hasSelfVideo = !!document.querySelector(
-                    '[class*="self"] video, ' +
-                    '[class*="local"] video, ' +
-                    '[data-is-me="true"] video'
-                );
+                        let videoCount = 0;
+                        for (const video of document.querySelectorAll('video')) {
+                            if (!isVisible(video)) continue;
+                            const parent = video.closest(
+                                '[class*="self"], [class*="local"], [data-is-me="true"]'
+                            );
+                            if (!parent) videoCount += 1;
+                        }
+                        return {
+                            count: videoCount,
+                            source: videoCount > 0 ? 'video' : 'none',
+                            evidence: '',
+                        };
+                    }''')
+                except Exception:
+                    continue
+                if isinstance(result, dict):
+                    frame_results.append(result)
 
-                // === 3. Считаем видео-элементы других участников (fallback) ===
-                const videos = document.querySelectorAll('video');
-                let videoCount = 0;
-                for (const vid of videos) {
-                    const parent = vid.closest('[class*="self"], [class*="local"], [data-is-me="true"]');
-                    if (!parent) {
-                        videoCount++;
-                    }
-                }
+            if not frame_results:
+                raise RuntimeError("participant count could not be read from any frame")
 
-                // === 4. Принимаем решение ===
-                let count = 0;
-                if (interfaceCount !== null) {
-                    // Если нашли число в интерфейсе — вычитаем бота (если он вошёл)
-                    count = interfaceCount - 1;
-                } else {
-                    // Fallback: используем количество видео
-                    count = videoCount;
-                }
-
-                return Math.max(0, count);
-            }''')
-
-            raw_count = int(result)
+            best_result = max(
+                frame_results,
+                key=lambda item: (
+                    1 if item.get("source") == "interface" else 0,
+                    int(item.get("count") or 0),
+                ),
+            )
+            raw_count = int(best_result.get("count") or 0)
+            evidence = str(best_result.get("evidence") or "")
+            source = str(best_result.get("source") or "unknown")
             max_expected = int(os.getenv("TELEMOST_MAX_EXPECTED_PARTICIPANTS", "15"))
             spike_delta = int(os.getenv("TELEMOST_PARTICIPANT_SPIKE_DELTA", "10"))
             previous = self._last_valid_participant_count
@@ -1402,7 +1612,11 @@ class TelemostBot:
 
             self._last_valid_participant_count = raw_count
             self._record_participant_observation(count=raw_count, valid=True)
-            self._print(f"[Bot] Other participants count: {raw_count}")
+            details = f", evidence={evidence!r}" if evidence else ""
+            self._print(
+                f"[Bot] Other participants count: {raw_count} "
+                f"(source={source}{details})"
+            )
             return raw_count
 
         except Exception as e:
@@ -1494,6 +1708,8 @@ class TelemostBot:
                 event["status"] = "failed"
                 event["error"] = "meeting room was not detected after reconnect"
             except Exception as e:
+                if self.page is not None and not self.page.is_closed():
+                    await self._save_reconnect_debug_screenshot(attempt)
                 event["status"] = "failed"
                 event["error"] = str(e)
                 self._print(f"[Bot] Reconnect attempt failed: {e}")
