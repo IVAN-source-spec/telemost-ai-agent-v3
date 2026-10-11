@@ -32,6 +32,7 @@ services:
     volumes:
     - ./data/auth:/app/data/auth
     - ./recordings/bot-1:/app/recordings
+    - .:/project-output
     - ./yandex_disk_upload_errors_bot_1.jsonl:/app/yandex_disk_upload_errors.jsonl
     - /run/user/1001/pulse/native:/run/user/1001/pulse/native
     - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
@@ -66,6 +67,7 @@ services:
     volumes:
     - ./data/auth:/app/data/auth:ro
     - ./recordings/bot-2:/app/recordings
+    - .:/project-output
     - ./yandex_disk_upload_errors_bot_2.jsonl:/app/yandex_disk_upload_errors.jsonl
     - /run/user/1001/pulse/native:/run/user/1001/pulse/native
     - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
@@ -100,6 +102,7 @@ services:
     volumes:
     - ./data/auth:/app/data/auth:ro
     - ./recordings/bot-3:/app/recordings
+    - .:/project-output
     - ./yandex_disk_upload_errors_bot_3.jsonl:/app/yandex_disk_upload_errors.jsonl
     - /run/user/1001/pulse/native:/run/user/1001/pulse/native
     - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
@@ -154,6 +157,7 @@ services:
     volumes:
     - ./data/auth:/app/data/auth:ro
     - ./recordings/bot-4:/app/recordings
+    - .:/project-output
     - ./yandex_disk_upload_errors_bot_4.jsonl:/app/yandex_disk_upload_errors.jsonl
     - /run/user/1001/pulse/native:/run/user/1001/pulse/native
     - /home/razumadmin/.config/pulse/cookie:/root/.config/pulse/cookie:ro
